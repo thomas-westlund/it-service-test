@@ -375,7 +375,7 @@ export default function App() {
 
         {/* Dashboard Content */}
         {currentTab === 'phone' && phoneData && (
-          <PhoneDashboard data={phoneData} fileName={phoneFileName} />
+          <PhoneDashboard data={phoneData} fileName={phoneFileName} ignoredAgents={ignoredAgents} />
         )}
         {currentTab === 'jira' && jiraData && (
           <JiraDashboard data={jiraData} fileName={jiraFileName} />

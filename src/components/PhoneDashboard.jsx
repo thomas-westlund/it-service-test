@@ -3,6 +3,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts'
 import StatCard from './StatCard'
+import { nameMatchKey } from '../utils/workloadCalc'
 import './PhoneDashboard.css'
 
 function formatDuration(seconds) {
@@ -25,8 +26,9 @@ const COLORS = {
   duration: '#057a55',
 }
 
-export default function PhoneDashboard({ data, fileName }) {
-  if (!data || data.length === 0) return null
+export default function PhoneDashboard({ data: rawData, fileName, ignoredAgents }) {
+  const data = (rawData || []).filter(a => !ignoredAgents?.has(nameMatchKey(a.agent)))
+  if (data.length === 0) return null
 
   const totalCalls = data.reduce((s, a) => s + a.totalCalls, 0)
   const totalAnswered = data.reduce((s, a) => s + a.answeredCalls, 0)
