@@ -2,7 +2,7 @@ import React, { useState, useCallback, useMemo } from 'react'
 import Papa from 'papaparse'
 import './App.css'
 import { parsePhoneCSV, detectPhoneCSV } from './utils/phoneParser'
-import { normalizeJiraRows, detectJiraCSV, filterJiraByMonth, aggregateJiraRows } from './utils/jiraParser'
+import { normalizeJiraRows, detectJiraCSV, filterJiraByMonth, filterJiraByDateRange, aggregateJiraRows } from './utils/jiraParser'
 import { samplePhoneData, sampleMarchJiraRows, seedSampleHistory } from './utils/sampleData'
 import { loadHistory, saveMonthToHistory, deleteFromHistory, formatPeriodLabel, currentPeriod } from './utils/historyStorage'
 import FileUploadZone from './components/FileUploadZone'
@@ -13,6 +13,7 @@ import MonthComparison from './components/MonthComparison'
 
 export default function App() {
   const [phoneData, setPhoneData] = useState(null)
+  const [phoneDateRange, setPhoneDateRange] = useState(null)  // { start: Date, end: Date } | null
   const [phoneFileName, setPhoneFileName] = useState('')
   const [jiraRawRows, setJiraRawRows] = useState(null)   // normalized, unfiltered
   const [jiraFileName, setJiraFileName] = useState('')
@@ -23,13 +24,18 @@ export default function App() {
   const [uploadError, setUploadError] = useState('')
   const [saveSuccess, setSaveSuccess] = useState(false)
 
-  // Jira data filtered to selected period
+  // Jira data filtered to common period with phone data (or selected month)
   const jiraData = useMemo(() => {
     if (!jiraRawRows) return null
-    const [y, m] = selectedPeriod.split('-').map(Number)
-    const filtered = filterJiraByMonth(jiraRawRows, y, m)
+    let filtered
+    if (phoneDateRange) {
+      filtered = filterJiraByDateRange(jiraRawRows, phoneDateRange.start, phoneDateRange.end)
+    } else {
+      const [y, m] = selectedPeriod.split('-').map(Number)
+      filtered = filterJiraByMonth(jiraRawRows, y, m)
+    }
     return aggregateJiraRows(filtered)
-  }, [jiraRawRows, selectedPeriod])
+  }, [jiraRawRows, selectedPeriod, phoneDateRange])
 
   // Comparison data from history
   const compareEntry = compareWith ? history[compareWith] : null
@@ -56,7 +62,12 @@ export default function App() {
       setActiveTab('jira')
     } else if (isPhone) {
       const result = parsePhoneCSV(parsedData)
-      setPhoneData(result)
+      setPhoneData(result.agents)
+      setPhoneDateRange(result.dateRange)
+      if (result.dateRange) {
+        const d = result.dateRange.start
+        setSelectedPeriod(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+      }
       setPhoneFileName(fileName)
       setActiveTab('phone')
     } else {
@@ -68,6 +79,7 @@ export default function App() {
     seedSampleHistory()
     setHistory(loadHistory())
     setPhoneData(samplePhoneData)
+    setPhoneDateRange(null)
     setPhoneFileName('sample-phone-march-2026.csv')
     setJiraRawRows(sampleMarchJiraRows)
     setJiraFileName('sample-jira-march-2026.csv')
@@ -78,6 +90,7 @@ export default function App() {
 
   const handleClearAll = () => {
     setPhoneData(null)
+    setPhoneDateRange(null)
     setPhoneFileName('')
     setJiraRawRows(null)
     setJiraFileName('')
@@ -107,6 +120,7 @@ export default function App() {
       setJiraFileName(`history-${period}`)
     }
     setSelectedPeriod(period)
+    setPhoneDateRange(null)  // history entries use month filter
     setActiveTab('phone')
     setCompareWith(null)
   }
@@ -167,10 +181,18 @@ export default function App() {
                   id="period-input"
                   type="month"
                   value={selectedPeriod}
-                  onChange={e => setSelectedPeriod(e.target.value)}
+                  onChange={e => { setSelectedPeriod(e.target.value); setPhoneDateRange(null) }}
                   className="period-input"
+                  title={phoneDateRange ? 'Change to override phone date range' : undefined}
                 />
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Jira filtered to this month</span>
+                {phoneDateRange ? (
+                  <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 500 }}>
+                    📅 Jira filtered to phone range:{' '}
+                    {phoneDateRange.start.toLocaleDateString()} – {phoneDateRange.end.toLocaleDateString()}
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Jira filtered to this month</span>
+                )}
               </div>
               {hasData && (
                 <button

@@ -21,6 +21,14 @@ const TOTAL_DURATION_COLUMNS = [
 const NOR_ANSWERED_BY_COLUMNS = ['besvart av', 'answered by']
 const NOR_ANSWERED_COLUMNS    = ['besvart']
 const NOR_DURATION_COLUMNS    = ['varighet']
+const NOR_DATE_COLUMNS        = ['dato', 'date']
+
+function parseNorDate(str) {
+  const m = String(str).trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
+  if (!m) return null
+  const d = new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]))
+  return isNaN(d.getTime()) ? null : d
+}
 
 /**
  * Find a matching column key from a list of candidate names
@@ -79,19 +87,32 @@ function isNorwegianCallLog(lowerHeaders) {
 }
 
 /**
- * Aggregate a Norwegian per-call log into per-agent summary rows
+ * Aggregate a Norwegian per-call log into per-agent summary rows.
+ * Returns { agents, dateRange } where dateRange is { start: Date, end: Date } | null.
  */
 function parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap) {
   const get = (row, col) => col ? row[lowerKeyMap[col]] : null
 
   const agentCol    = findColumn(lowerHeaders, NOR_ANSWERED_BY_COLUMNS)
   const durationCol = findColumn(lowerHeaders, NOR_DURATION_COLUMNS)
+  const dateCol     = findColumn(lowerHeaders, NOR_DATE_COLUMNS)
 
   const agentMap = {}
+  let minDate = null
+  let maxDate = null
 
   for (const row of rows) {
     const agent    = String(get(row, agentCol) || '').trim()
     const duration = parseDurationToSeconds(get(row, durationCol))
+
+    // Track date range regardless of whether the call was answered
+    if (dateCol) {
+      const d = parseNorDate(String(get(row, dateCol) || ''))
+      if (d) {
+        if (!minDate || d < minDate) minDate = d
+        if (!maxDate || d > maxDate) maxDate = d
+      }
+    }
 
     if (!agent) continue  // unanswered calls have no agent
 
@@ -102,7 +123,7 @@ function parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap) {
     agentMap[agent].totalDurationSeconds += duration
   }
 
-  return Object.entries(agentMap).map(([agent, stats]) => ({
+  const agents = Object.entries(agentMap).map(([agent, stats]) => ({
     agent,
     totalCalls: stats.answeredCalls,
     answeredCalls: stats.answeredCalls,
@@ -112,6 +133,9 @@ function parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap) {
       : 0,
     totalDurationSeconds: stats.totalDurationSeconds,
   }))
+
+  const dateRange = (minDate && maxDate) ? { start: minDate, end: maxDate } : null
+  return { agents, dateRange }
 }
 
 /**
@@ -130,7 +154,7 @@ export function parsePhoneCSV(rows) {
 
   // Norwegian per-call log path
   if (isNorwegianCallLog(lowerHeaders)) {
-    return parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap)
+    return parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap)  // returns { agents, dateRange }
   }
 
   // Standard aggregate-per-agent path
@@ -141,7 +165,7 @@ export function parsePhoneCSV(rows) {
   const avgDurCol   = findColumn(lowerHeaders, AVG_DURATION_COLUMNS)
   const totalDurCol = findColumn(lowerHeaders, TOTAL_DURATION_COLUMNS)
 
-  return rows
+  const agents = rows
     .filter(row => {
       const agentVal = agentCol ? row[lowerKeyMap[agentCol]] : null
       return agentVal && String(agentVal).trim() !== ''
@@ -165,6 +189,8 @@ export function parsePhoneCSV(rows) {
       }
     })
     .filter(r => r.agent)
+
+  return { agents, dateRange: null }
 }
 
 /**

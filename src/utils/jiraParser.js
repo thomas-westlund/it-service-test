@@ -151,6 +151,22 @@ export function normalizeJiraRows(rows) {
 }
 
 /**
+ * Filter normalized rows to those created within an arbitrary date range.
+ * startDate and endDate are Date objects; endDate is inclusive (entire day).
+ * Rows with no createdTs are always included.
+ */
+export function filterJiraByDateRange(rows, startDate, endDate) {
+  if (!rows) return []
+  const startMs = startDate.getTime()
+  // Add one day to endDate so the entire end day is included
+  const endMs = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate() + 1).getTime()
+  return rows.filter(row => {
+    if (row.createdTs === null || row.createdTs === undefined) return true
+    return row.createdTs >= startMs && row.createdTs < endMs
+  })
+}
+
+/**
  * Filter normalized rows to only those created within a given month
  * If a row has no createdTs, it is included (no date to filter on)
  */
