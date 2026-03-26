@@ -1,12 +1,14 @@
 import React, { useState, useMemo } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ComposedChart, Line, Legend, ReferenceLine
+  ResponsiveContainer, ComposedChart, Legend
 } from 'recharts'
 import StatCard from './StatCard'
 import {
   TEAM_CONFIG, WORKLOAD_DEFAULTS,
-  computeCapacity, calculateAgentWorkload, formatMinutes, formatMinutesLong, nameMatchKey
+  computeCapacity, calculateAgentWorkload,
+  formatMinutes, formatWorkTime, formatMinutesLong,
+  nameMatchKey, countWorkingDays
 } from '../utils/workloadCalc'
 import './WorkloadDashboard.css'
 
@@ -23,24 +25,25 @@ function scoreColor(pct) {
 }
 
 function fmtDate(dateStr) {
-  // "2026-03-05" → "5 Mar"
   const [, , d] = dateStr.split('-')
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
   const mIdx = parseInt(dateStr.split('-')[1]) - 1
   return `${parseInt(d)} ${months[mIdx]}`
 }
 
-const WorkloadTooltip = ({ active, payload }) => {
+const WorkloadTooltip = ({ active, payload, netMinPerDay }) => {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
+  const fmt = m => formatWorkTime(m, netMinPerDay)
   return (
     <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', boxShadow: 'var(--shadow-md)', fontSize: 12 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>{d.fullName}</div>
-      <div style={{ color: '#6366f1' }}>Phone time: <strong>{formatMinutes(d.phoneMid)}</strong> <span style={{ color: 'var(--text-muted)' }}>({formatMinutes(d.phoneLow)}–{formatMinutes(d.phoneHigh)})</span></div>
-      <div style={{ color: '#0891b2' }}>Ticket time: <strong>{formatMinutes(d.ticketMid)}</strong> <span style={{ color: 'var(--text-muted)' }}>({formatMinutes(d.ticketLow)}–{formatMinutes(d.ticketHigh)})</span></div>
+      <div style={{ color: '#6366f1' }}>Phone time: <strong>{fmt(d.phoneMid)}</strong> <span style={{ color: 'var(--text-muted)' }}>({fmt(d.phoneLow)}–{fmt(d.phoneHigh)})</span></div>
+      <div style={{ color: '#a78bfa' }}>Quick tickets: <strong>{fmt(d.quickMid)}</strong></div>
+      <div style={{ color: '#0891b2' }}>Ticket time: <strong>{fmt(d.ticketMid)}</strong> <span style={{ color: 'var(--text-muted)' }}>({fmt(d.ticketLow)}–{fmt(d.ticketHigh)})</span></div>
       <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6, fontWeight: 600 }}>
-        Total: {formatMinutes(d.totalMid)} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({formatMinutes(d.totalLow)}–{formatMinutes(d.totalHigh)})</span>
+        Total: {fmt(d.totalMid)} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({fmt(d.totalLow)}–{fmt(d.totalHigh)})</span>
       </div>
       {d.avgResolve != null && (
         <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>Avg resolve: {formatMinutes(d.avgResolve)}</div>
@@ -49,25 +52,44 @@ const WorkloadTooltip = ({ active, payload }) => {
   )
 }
 
-const CapacityTooltip = ({ active, payload }) => {
+const CapacityTooltip = ({ active, payload, netMinPerDay, periodCapacity }) => {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
-  const pct = Math.round((d.workload / (d.workload + d.remaining)) * 100)
+  const pct = Math.round((d.workload / periodCapacity) * 100)
+  const fmt = m => formatWorkTime(m, netMinPerDay)
   return (
     <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', boxShadow: 'var(--shadow-md)', fontSize: 12 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>{d.fullName}</div>
-      <div style={{ color: scoreColor(pct) }}>Workload: <strong>{formatMinutes(d.workload)}</strong> ({pct}%)</div>
-      <div style={{ color: 'var(--success)' }}>Remaining: <strong>{formatMinutes(Math.max(0, d.remaining))}</strong></div>
+      <div style={{ color: scoreColor(pct) }}>Workload: <strong>{fmt(d.workload)}</strong> ({pct}%)</div>
+      <div style={{ color: 'var(--success)' }}>Remaining: <strong>{fmt(Math.max(0, d.remaining))}</strong></div>
+      <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>Capacity: {fmt(periodCapacity)}</div>
     </div>
   )
 }
 
-export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats, phoneHasOfficeHoursData, ignoredAgents, onToggleIgnored }) {
+export default function WorkloadDashboard({
+  phoneData, jiraData,
+  phoneDailyStats, phoneHasOfficeHoursData,
+  phoneDateRange,
+  ignoredAgents, onToggleIgnored,
+}) {
   const [afterCallMid, setAfterCallMid] = useState(WORKLOAD_DEFAULTS.afterCallMid)
   const [ticketMid, setTicketMid] = useState(WORKLOAD_DEFAULTS.ticketMid)
 
   const capacity = useMemo(() => computeCapacity(TEAM_CONFIG), [])
+  const { netMinutesPerDay } = capacity
+
+  // Actual working days in the loaded period (Mon–Fri only)
+  const workingDays = useMemo(() => {
+    if (phoneDateRange?.start && phoneDateRange?.end) {
+      return countWorkingDays(phoneDateRange.start, phoneDateRange.end) || 21
+    }
+    return 21
+  }, [phoneDateRange])
+
+  const periodCapacity = netMinutesPerDay * workingDays
+  const fmt = m => formatWorkTime(m, netMinutesPerDay)
 
   const agentRows = useMemo(() => {
     const phoneMap = {}
@@ -94,7 +116,7 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
       }).sort((a, b) => b.wl.totalMid - a.wl.totalMid)
   }, [phoneData, jiraData, afterCallMid, ticketMid, ignoredAgents])
 
-  // All known agents for the ignore UI (union from both sources)
+  // All known agents for the ignore UI
   const allAgentEntries = useMemo(() => {
     const keyToName = {}
     if (phoneData) phoneData.forEach(a => {
@@ -117,6 +139,7 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
     phoneMid: Math.round(r.wl.phoneTotalMid),
     phoneLow: Math.round(r.wl.phoneTotalLow),
     phoneHigh: Math.round(r.wl.phoneTotalHigh),
+    quickMid: Math.round(r.wl.quickTotalMid),
     ticketMid: Math.round(r.wl.ticketTotalMid),
     ticketLow: Math.round(r.wl.ticketTotalLow),
     ticketHigh: Math.round(r.wl.ticketTotalHigh),
@@ -131,12 +154,12 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
   const teamTotalHigh = agentRows.reduce((s, r) => s + r.wl.totalHigh, 0)
   const agentCount = agentRows.length || 1
   const avgWorkloadMid = teamTotalMid / agentCount
-  const monthlyNetMinutes = capacity.netMinutesPerDay * 21
+  const teamCapacity = periodCapacity * agentCount
 
   // Remaining capacity chart data
   const capacityChartData = agentRows.map(r => {
     const workload = Math.round(r.wl.totalMid)
-    const remaining = Math.max(0, Math.round(monthlyNetMinutes - workload))
+    const remaining = Math.max(0, Math.round(periodCapacity - workload))
     return {
       name: shortenName(r.displayName),
       fullName: r.displayName,
@@ -145,28 +168,22 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
     }
   })
 
-  // Daily activity chart — merge phone daily stats + jira daily stats
+  // Daily activity
   const dailyChartData = useMemo(() => {
     const map = {}
-
     if (phoneDailyStats) {
       for (const d of phoneDailyStats) {
-        map[d.date] = { date: d.date, calls: d.answeredCalls, tickets: 0, phoneWorkload: 0 }
-        // Estimate phone workload for that day
-        const totalPhoneMin = d.totalDurationSeconds / 60 + d.answeredCalls * afterCallMid
-        map[d.date].phoneWorkload = Math.round(totalPhoneMin)
+        map[d.date] = { date: d.date, calls: d.answeredCalls, tickets: 0 }
       }
     }
-
     if (jiraData?.jiraDailyStats) {
       for (const d of jiraData.jiraDailyStats) {
-        if (!map[d.date]) map[d.date] = { date: d.date, calls: 0, tickets: 0, phoneWorkload: 0 }
+        if (!map[d.date]) map[d.date] = { date: d.date, calls: 0, tickets: 0 }
         map[d.date].tickets += d.created || 0
       }
     }
-
     return Object.values(map).sort((a, b) => a.date.localeCompare(b.date))
-  }, [phoneDailyStats, jiraData, afterCallMid])
+  }, [phoneDailyStats, jiraData])
 
   // On-call stats
   const phoneOfficeHoursCalls = agentRows.reduce((s, r) => s + (r.phone?.officeHoursCalls || 0), 0)
@@ -175,6 +192,10 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
   const phoneOnCallDuration = agentRows.reduce((s, r) => s + (r.phone?.onCallDurationSeconds || 0), 0)
   const officeHoursStats = jiraData?.officeHoursStats
   const showOnCallSection = phoneHasOfficeHoursData || officeHoursStats?.hasOfficeHoursData
+
+  const periodLabel = phoneDateRange
+    ? `${phoneDateRange.start.toLocaleDateString()} – ${phoneDateRange.end.toLocaleDateString()} (${workingDays} working days)`
+    : `21 working days (estimate)`
 
   return (
     <div className="workload-dashboard">
@@ -227,7 +248,7 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
               <span className="slider-label">{WORKLOAD_DEFAULTS.afterCallHigh}m</span>
               <span className="slider-value">{afterCallMid}m</span>
             </div>
-            <div className="assumption-note">Tickets created &amp; resolved within 20 min are excluded (handled during the call)</div>
+            <div className="assumption-note">Quick-resolved tickets (created &amp; resolved &lt;20 min) counted as avg call + after-call time</div>
           </div>
 
           <div className="assumption-group">
@@ -264,6 +285,17 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
           </div>
 
           <div className="assumption-group">
+            <div className="assumption-title">Period</div>
+            <div className="capacity-breakdown" style={{ flexWrap: 'wrap' }}>
+              <span>📅 {periodLabel}</span>
+            </div>
+            <div className="assumption-note">
+              Capacity per person: <strong>{fmt(periodCapacity)}</strong> · Team total: <strong>{fmt(teamCapacity)}</strong>
+              <br />Counts Mon–Fri within office hours ({TEAM_CONFIG.workStartHour}:00–{TEAM_CONFIG.workEndHour}:00)
+            </div>
+          </div>
+
+          <div className="assumption-group">
             <div className="assumption-title">Team structure</div>
             <div className="team-structure-badges">
               <span className="team-badge total">{TEAM_CONFIG.teamSize} members</span>
@@ -281,37 +313,37 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
         <div className="stats-grid">
           <StatCard
             title="Team Total Workload"
-            value={formatMinutes(teamTotalMid)}
-            subtitle={`Range: ${formatMinutes(teamTotalLow)} – ${formatMinutes(teamTotalHigh)}`}
+            value={fmt(teamTotalMid)}
+            subtitle={`Range: ${fmt(teamTotalLow)} – ${fmt(teamTotalHigh)}`}
             color="var(--primary)"
           />
           <StatCard
             title="Avg Workload / Agent"
-            value={formatMinutes(avgWorkloadMid)}
-            subtitle={`vs ${formatMinutes(monthlyNetMinutes)} net capacity (~21 work days)`}
-            color={scoreColor((avgWorkloadMid / monthlyNetMinutes) * 100)}
+            value={fmt(avgWorkloadMid)}
+            subtitle={`vs ${fmt(periodCapacity)} capacity (${workingDays} working days)`}
+            color={scoreColor((avgWorkloadMid / periodCapacity) * 100)}
+          />
+          <StatCard
+            title="Team Remaining Capacity"
+            value={fmt(Math.max(0, teamCapacity - teamTotalMid))}
+            subtitle={`of ${fmt(teamCapacity)} total (${agentCount} agents × ${workingDays}d)`}
+            color="var(--success)"
           />
           <StatCard
             title="Quick-Resolved Tickets"
             value={totalQuickResolved}
-            subtitle="Excluded — created & resolved <20 min (handled during call)"
-            color="var(--text-muted)"
+            subtitle={`Counted as ≈ avg call + after-call work (created & resolved <20 min)`}
+            color="#7c3aed"
           />
           <StatCard
             title="Avg Ticket Resolve Time"
             value={avgResolveTime != null ? formatMinutes(avgResolveTime) : '—'}
             subtitle={avgResolveTime != null ? 'Non-quick tickets with resolution timestamp' : 'Needs resolved timestamps in Jira data'}
-            color="#7c3aed"
+            color="#0891b2"
           />
           <StatCard
-            title="Net Capacity / Day"
-            value={`${capacity.netMinutesPerDay}m`}
-            subtitle={`${capacity.annualWorkingDays} working days/yr after ${TEAM_CONFIG.vacationWeeks} wks vacation`}
-            color="var(--success)"
-          />
-          <StatCard
-            title="On-Call Impact / Person"
-            value={formatMinutesLong(capacity.onCallMinutesLostAnnual)}
+            title="On-Call Impact / Person / Year"
+            value={fmt(capacity.onCallMinutesLostAnnual)}
             subtitle={`~${capacity.onCallTimesPerYear}×/yr × ${formatMinutes(capacity.onCallMinutesLostPerOccurrence)} each`}
             color="var(--warning)"
           />
@@ -324,21 +356,26 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
         <div className="workload-legend">
           <div className="workload-legend-item">
             <div className="workload-legend-dot" style={{ background: '#6366f1' }} />
-            Phone time (call duration + {afterCallMid}m after-call work per answered call)
+            Phone time (call duration + {afterCallMid}m after-call)
+          </div>
+          <div className="workload-legend-item">
+            <div className="workload-legend-dot" style={{ background: '#a78bfa' }} />
+            Quick tickets (≈ avg call + {afterCallMid}m after-call each)
           </div>
           <div className="workload-legend-item">
             <div className="workload-legend-dot" style={{ background: '#0891b2' }} />
-            Ticket time (qualifying tickets × {ticketMid}m)
+            Qualifying tickets × {ticketMid}m
           </div>
         </div>
         <div className="chart-card">
           <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 40 }}>
+            <BarChart data={chartData} margin={{ top: 4, right: 8, left: 10, bottom: 40 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis dataKey="name" tick={{ fontSize: 11 }} angle={-30} textAnchor="end" interval={0} />
-              <YAxis tick={{ fontSize: 11 }} tickFormatter={v => `${v}m`} />
-              <Tooltip content={<WorkloadTooltip />} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={v => fmt(v)} width={56} />
+              <Tooltip content={<WorkloadTooltip netMinPerDay={netMinutesPerDay} />} />
               <Bar dataKey="phoneMid" stackId="a" fill="#6366f1" name="Phone" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="quickMid" stackId="a" fill="#a78bfa" name="Quick tickets" radius={[0, 0, 0, 0]} />
               <Bar dataKey="ticketMid" stackId="a" fill="#0891b2" name="Tickets" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -349,23 +386,23 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
       <div className="dashboard-section">
         <div className="section-header">🔋 Remaining Capacity Per Agent</div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-          Based on ~{formatMinutes(monthlyNetMinutes)} net monthly capacity (21 working days). Mid workload estimate.
+          Based on {fmt(periodCapacity)} net capacity per agent ({workingDays} working days × {capacity.netMinutesPerDay}m/day, Mon–Fri)
         </div>
         <div className="chart-card">
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={capacityChartData} margin={{ top: 4, right: 8, left: -10, bottom: 40 }} layout="vertical">
+          <ResponsiveContainer width="100%" height={Math.max(200, agentCount * 48 + 40)}>
+            <BarChart data={capacityChartData} layout="vertical" margin={{ top: 4, right: 64, left: 10, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={v => `${v}m`} />
-              <YAxis dataKey="name" type="category" tick={{ fontSize: 11 }} width={72} />
-              <Tooltip content={<CapacityTooltip />} />
+              <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={v => fmt(v)} width={56} />
+              <YAxis dataKey="name" type="category" tick={{ fontSize: 12 }} width={72} />
+              <Tooltip content={<CapacityTooltip netMinPerDay={netMinutesPerDay} periodCapacity={periodCapacity} />} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="workload" stackId="c" fill="#6366f1" name="Workload" radius={[0, 0, 0, 0]} />
-              <Bar dataKey="remaining" stackId="c" fill="#d1fae5" name="Remaining" radius={[0, 3, 3, 0]} />
+              <Bar dataKey="workload" stackId="c" fill="#6366f1" name="Workload" radius={[0, 0, 0, 0]} label={{ position: 'insideLeft', fontSize: 10, fill: 'white', formatter: v => v > 60 ? fmt(v) : '' }} />
+              <Bar dataKey="remaining" stackId="c" fill="#d1fae5" name="Remaining" radius={[0, 3, 3, 0]} label={{ position: 'right', fontSize: 11, fill: 'var(--success)', formatter: v => v > 0 ? fmt(v) : '' }} />
             </BarChart>
           </ResponsiveContainer>
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, paddingLeft: 4 }}>
-          Team remaining: <strong>{formatMinutes(Math.max(0, monthlyNetMinutes * agentCount - teamTotalMid))}</strong> of <strong>{formatMinutes(monthlyNetMinutes * agentCount)}</strong> total capacity
+          Team remaining: <strong style={{ color: 'var(--success)' }}>{fmt(Math.max(0, teamCapacity - teamTotalMid))}</strong> of <strong>{fmt(teamCapacity)}</strong> total
         </div>
       </div>
 
@@ -383,10 +420,7 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
                 <XAxis dataKey="date" tick={{ fontSize: 10 }} angle={-45} textAnchor="end" interval={0} tickFormatter={fmtDate} />
                 <YAxis yAxisId="left" tick={{ fontSize: 11 }} allowDecimals={false} />
                 <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} allowDecimals={false} />
-                <Tooltip
-                  labelFormatter={fmtDate}
-                  formatter={(v, name) => [v, name]}
-                />
+                <Tooltip labelFormatter={fmtDate} formatter={(v, name) => [v, name]} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar yAxisId="left" dataKey="calls" fill="#6366f1" name="Calls answered" radius={[2, 2, 0, 0]} />
                 <Bar yAxisId="right" dataKey="tickets" fill="#0891b2" name="Tickets created" radius={[2, 2, 0, 0]} opacity={0.8} />
@@ -412,12 +446,12 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
                   <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg)', borderRadius: 6 }}>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Office Hours</div>
                     <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--primary)' }}>{phoneOfficeHoursCalls}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>calls · {formatMinutes(phoneOfficeHoursDuration / 60)}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>calls · {fmt(phoneOfficeHoursDuration / 60)}</div>
                   </div>
                   <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg)', borderRadius: 6 }}>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>On-Call</div>
                     <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--warning)' }}>{phoneOnCallCalls}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>calls · {formatMinutes(phoneOnCallDuration / 60)}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>calls · {fmt(phoneOnCallDuration / 60)}</div>
                   </div>
                 </div>
                 {(phoneOfficeHoursCalls + phoneOnCallCalls) > 0 && (
@@ -484,8 +518,9 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
                 <th>Data</th>
                 <th className="number">Answered calls</th>
                 <th className="number">Phone time</th>
-                <th className="number">Tickets</th>
-                <th className="number">Quick excl.</th>
+                <th className="number">Quick tickets</th>
+                <th className="number">Quick time</th>
+                <th className="number">Qualifying tickets</th>
                 <th className="number">Ticket time</th>
                 <th className="number">Avg resolve</th>
                 <th className="number">Low</th>
@@ -496,7 +531,7 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
             </thead>
             <tbody>
               {agentRows.map(({ displayName, phone, jiraStats, wl, hasPhone, hasJira }) => {
-                const pct = monthlyNetMinutes > 0 ? (wl.totalMid / monthlyNetMinutes) * 100 : 0
+                const pct = periodCapacity > 0 ? (wl.totalMid / periodCapacity) * 100 : 0
                 const color = scoreColor(pct)
                 return (
                   <tr key={displayName}>
@@ -508,14 +543,15 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
                       </div>
                     </td>
                     <td className="number">{phone ? phone.answeredCalls : '—'}</td>
-                    <td className="number">{formatMinutes(wl.phoneTotalMid)}</td>
-                    <td className="number">{jiraStats ? jiraStats.qualifyingTickets : '—'}</td>
-                    <td className="number" style={{ color: 'var(--text-muted)' }}>{jiraStats ? wl.quickCount : '—'}</td>
-                    <td className="number">{formatMinutes(wl.ticketTotalMid)}</td>
+                    <td className="number">{fmt(wl.phoneTotalMid)}</td>
+                    <td className="number" style={{ color: '#7c3aed' }}>{jiraStats ? wl.quickCount : '—'}</td>
+                    <td className="number" style={{ color: '#7c3aed' }}>{jiraStats ? fmt(wl.quickTotalMid) : '—'}</td>
+                    <td className="number">{jiraStats ? wl.ticketCount : '—'}</td>
+                    <td className="number">{fmt(wl.ticketTotalMid)}</td>
                     <td className="number">{wl.avgResolveTimeMinutes != null ? formatMinutes(wl.avgResolveTimeMinutes) : '—'}</td>
-                    <td className="number" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{formatMinutes(wl.totalLow)}</td>
-                    <td className="number" style={{ fontWeight: 600 }}>{formatMinutes(wl.totalMid)}</td>
-                    <td className="number" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{formatMinutes(wl.totalHigh)}</td>
+                    <td className="number" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{fmt(wl.totalLow)}</td>
+                    <td className="number" style={{ fontWeight: 600 }}>{fmt(wl.totalMid)}</td>
+                    <td className="number" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{fmt(wl.totalHigh)}</td>
                     <td>
                       <div className="workload-score-bar">
                         <div className="workload-score-track">
@@ -531,7 +567,7 @@ export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats
           </table>
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, paddingLeft: 4 }}>
-          % = mid estimate vs ~{formatMinutes(monthlyNetMinutes)} net monthly capacity (21 working days × {capacity.netMinutesPerDay}m/day)
+          % = mid estimate vs {fmt(periodCapacity)} net capacity ({workingDays} Mon–Fri days × {capacity.netMinutesPerDay}m/day)
         </div>
       </div>
     </div>

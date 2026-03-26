@@ -34,7 +34,7 @@ export const WORKLOAD_DEFAULTS = {
   ticketLow: 15,                 // minutes actual work per qualifying ticket, low
   ticketMid: 30,                 // midpoint
   ticketHigh: 45,                // high estimate
-  quickResolveThresholdMin: 20,  // tickets resolved within 20 min are excluded
+  quickResolveThresholdMin: 20,  // tickets resolved within 20 min are treated as call-handled
 }
 
 /**
@@ -67,7 +67,25 @@ export function computeCapacity(config = TEAM_CONFIG) {
 }
 
 /**
- * Calculate workload estimates for one agent for a period
+ * Count actual Mon–Fri working days between two Date objects (inclusive).
+ */
+export function countWorkingDays(startDate, endDate) {
+  if (!startDate || !endDate) return null
+  let count = 0
+  const d = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate())
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate())
+  while (d <= end) {
+    const dow = d.getDay()
+    if (dow !== 0 && dow !== 6) count++
+    d.setDate(d.getDate() + 1)
+  }
+  return count
+}
+
+/**
+ * Calculate workload estimates for one agent for a period.
+ * Quick-resolved tickets are counted as ≈ avg call duration + after-call work each,
+ * since they represent call-handled work not already covered by phone call time.
  */
 export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
   const s = { ...WORKLOAD_DEFAULTS, ...settings }
@@ -75,17 +93,20 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
   // Phone workload
   let phoneCallMinutes = 0
   let afterCallLow = 0, afterCallMid = 0, afterCallHigh = 0
+  let avgCallMin = 0
   if (phoneAgent) {
     phoneCallMinutes = (phoneAgent.totalDurationSeconds || 0) / 60
     const answered = phoneAgent.answeredCalls || 0
     afterCallLow = answered * s.afterCallLow
     afterCallMid = answered * s.afterCallMid
     afterCallHigh = answered * s.afterCallHigh
+    avgCallMin = answered > 0 ? phoneCallMinutes / answered : 0
   }
 
-  // Ticket workload (qualifying = excluding quick-resolved)
+  // Qualifying ticket workload
   let ticketCount = 0, quickCount = 0
   let ticketLow = 0, ticketMid = 0, ticketHigh = 0
+  let quickLow = 0, quickMid = 0, quickHigh = 0
   let avgResolveTimeMinutes = null
   if (jiraStats) {
     ticketCount = jiraStats.qualifyingTickets ?? jiraStats.totalTickets ?? 0
@@ -93,6 +114,13 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
     ticketLow = ticketCount * s.ticketLow
     ticketMid = ticketCount * s.ticketMid
     ticketHigh = ticketCount * s.ticketHigh
+    // Quick-resolved: ≈ avg call duration + after-call work per ticket
+    const qLow = avgCallMin + s.afterCallLow
+    const qMid = avgCallMin + s.afterCallMid
+    const qHigh = avgCallMin + s.afterCallHigh
+    quickLow = quickCount * qLow
+    quickMid = quickCount * qMid
+    quickHigh = quickCount * qHigh
     avgResolveTimeMinutes = jiraStats.avgResolveTimeMinutes ?? null
   }
 
@@ -107,9 +135,12 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
     ticketTotalLow: ticketLow,
     ticketTotalMid: ticketMid,
     ticketTotalHigh: ticketHigh,
-    totalLow: phoneCallMinutes + afterCallLow + ticketLow,
-    totalMid: phoneCallMinutes + afterCallMid + ticketMid,
-    totalHigh: phoneCallMinutes + afterCallHigh + ticketHigh,
+    quickTotalLow: quickLow,
+    quickTotalMid: quickMid,
+    quickTotalHigh: quickHigh,
+    totalLow: phoneCallMinutes + afterCallLow + ticketLow + quickLow,
+    totalMid: phoneCallMinutes + afterCallMid + ticketMid + quickMid,
+    totalHigh: phoneCallMinutes + afterCallHigh + ticketHigh + quickHigh,
     avgResolveTimeMinutes,
   }
 }
@@ -118,8 +149,6 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
  * Normalise an agent name to a matching key using first + last word only.
  * "Jarle Alexander Dominici Pedersen" → "jarle pedersen"
  * "Jarle A Dominici Pedersen"         → "jarle pedersen"
- * Lets phone and Jira records for the same person match even when middle
- * names or initials differ between exports.
  */
 export function nameMatchKey(name) {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
@@ -128,7 +157,7 @@ export function nameMatchKey(name) {
   return `${parts[0]} ${parts[parts.length - 1]}`.toLowerCase()
 }
 
-/** Format minutes as Xh Ym */
+/** Format minutes as Xh Ym (clock time, for small durations) */
 export function formatMinutes(min) {
   if (min == null || isNaN(min) || min < 0) return '—'
   const h = Math.floor(min / 60)
@@ -138,7 +167,39 @@ export function formatMinutes(min) {
   return `${h}h ${m}m`
 }
 
-/** Format minutes as days + hours (for annual figures) */
+/**
+ * Format minutes as working days / hours / minutes.
+ * 1 working day = netMinutesPerDay (default 410 min).
+ * Examples (at 410m/day):
+ *   45m   → "45m"
+ *   90m   → "1h 30m"
+ *   410m  → "1d"
+ *   500m  → "1d 1h 30m"
+ *   820m  → "2d"
+ *  8610m  → "21d"
+ */
+export function formatWorkTime(min, netMinPerDay = 410) {
+  if (min == null || isNaN(min) || min < 0) return '—'
+  const totalMin = Math.round(min)
+  if (totalMin < netMinPerDay) {
+    // Less than one working day — show as Xh Ym
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    if (h === 0) return `${m}m`
+    if (m === 0) return `${h}h`
+    return `${h}h ${m}m`
+  }
+  const days = Math.floor(totalMin / netMinPerDay)
+  const rem = totalMin % netMinPerDay
+  const hours = Math.floor(rem / 60)
+  const minutes = rem % 60
+  const parts = [`${days}d`]
+  if (hours > 0) parts.push(`${hours}h`)
+  if (minutes > 0) parts.push(`${minutes}m`)
+  return parts.join(' ')
+}
+
+/** Format minutes as days + hours (for annual/long figures, 8h clock day) */
 export function formatMinutesLong(min) {
   if (min == null || isNaN(min)) return '—'
   const days = Math.floor(min / (60 * 8))

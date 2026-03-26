@@ -386,6 +386,7 @@ export default function App() {
             jiraData={jiraData}
             phoneDailyStats={phoneDailyStats}
             phoneHasOfficeHoursData={phoneHasOfficeHoursData}
+            phoneDateRange={phoneDateRange}
             ignoredAgents={ignoredAgents}
             onToggleIgnored={handleToggleIgnored}
           />
