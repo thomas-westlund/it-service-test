@@ -156,6 +156,12 @@ export default function WorkloadDashboard({
   const avgWorkloadMid = teamTotalMid / agentCount
   const teamCapacity = periodCapacity * agentCount
 
+  // Team-average call duration for the quick-ticket rate display
+  const totalAnswered = agentRows.reduce((s, r) => s + (r.phone?.answeredCalls || 0), 0)
+  const totalCallMinutes = agentRows.reduce((s, r) => s + (r.wl?.phoneCallMinutes || 0), 0)
+  const teamAvgCallMin = totalAnswered > 0 ? totalCallMinutes / totalAnswered : 0
+  const quickPerTicketMid = teamAvgCallMin + afterCallMid
+
   // Remaining capacity chart data
   const capacityChartData = agentRows.map(r => {
     const workload = Math.round(r.wl.totalMid)
@@ -248,7 +254,9 @@ export default function WorkloadDashboard({
               <span className="slider-label">{WORKLOAD_DEFAULTS.afterCallHigh}m</span>
               <span className="slider-value">{afterCallMid}m</span>
             </div>
-            <div className="assumption-note">Quick-resolved tickets (created &amp; resolved &lt;20 min) counted as avg call + after-call time</div>
+            <div className="assumption-note">
+              Quick-resolved tickets (&lt;20 min): avg call ({formatMinutes(teamAvgCallMin)}) + <strong>{afterCallMid}m</strong> = <strong>~{formatMinutes(quickPerTicketMid)}/ticket</strong>
+            </div>
           </div>
 
           <div className="assumption-group">
@@ -332,7 +340,7 @@ export default function WorkloadDashboard({
           <StatCard
             title="Quick-Resolved Tickets"
             value={totalQuickResolved}
-            subtitle={`Counted as ≈ avg call + after-call work (created & resolved <20 min)`}
+            subtitle={`~${formatMinutes(quickPerTicketMid)}/ticket (avg call ${formatMinutes(teamAvgCallMin)} + ${afterCallMid}m after-call)`}
             color="#7c3aed"
           />
           <StatCard
