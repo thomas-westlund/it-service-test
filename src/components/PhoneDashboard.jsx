@@ -123,9 +123,9 @@ export default function PhoneDashboard({ data, fileName }) {
           </div>
 
           <div className="chart-card">
-            <div className="chart-title">Avg Call Duration Per Agent (seconds)</div>
+            <div className="chart-title">Avg Call Duration Per Agent</div>
             <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 40 }}>
+              <BarChart data={chartData} margin={{ top: 4, right: 8, left: 10, bottom: 40 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis
                   dataKey="name"
@@ -134,9 +134,9 @@ export default function PhoneDashboard({ data, fileName }) {
                   textAnchor="end"
                   interval={0}
                 />
-                <YAxis tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={v => formatDuration(v)} />
                 <Tooltip content={<DurationTooltip />} />
-                <Bar dataKey="avgDuration" fill={COLORS.duration} radius={[3, 3, 0, 0]} name="Avg Duration (s)" />
+                <Bar dataKey="avgDuration" fill={COLORS.duration} radius={[3, 3, 0, 0]} name="Avg Duration" />
               </BarChart>
             </ResponsiveContainer>
           </div>

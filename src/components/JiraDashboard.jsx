@@ -68,36 +68,39 @@ const CustomPieTooltip = ({ active, payload }) => {
   )
 }
 
-const STOP_WORDS = new Set([
-  // Norwegian
-  'og', 'i', 'er', 'på', 'til', 'av', 'for', 'med', 'at', 'en', 'et', 'den', 'det',
-  'de', 'ikke', 'som', 'har', 'fra', 'om', 'men', 'seg', 'kan', 'vil', 'var', 'vi',
-  'så', 'da', 'når', 'noe', 'ny', 'nye', 'sin', 'sitt', 'sine', 'han', 'hun', 'etter',
-  'inn', 'ut', 'over', 'under', 'mot', 'hos', 'alle', 'har', 'også', 'ble', 'bli',
-  // English
-  'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
-  'is', 'are', 'was', 'be', 'been', 'has', 'have', 'had', 'not', 'it', 'its',
-  'from', 'by', 'as', 'this', 'that', 'but', 'can', 'will', 'do', 'did',
-  'after', 'into', 'up', 'out', 'no', 'new', 'all', 'so', 'when', 'if',
-])
+// Split a ticket summary on " - " (space-dash-space) to preserve "INC-123" style keys
+function splitSubject(summary) {
+  return String(summary || '').split(/\s+-\s+/).map(s => s.trim()).filter(Boolean)
+}
 
-function extractTopKeywords(rows, topN = 15) {
+function extractTopIssues(rows, topN = 15) {
   const freq = {}
   for (const row of rows) {
-    if (!row.summary) continue
-    const words = row.summary
-      .toLowerCase()
-      .replace(/[^a-zæøåéèàü0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length >= 3 && !STOP_WORDS.has(w) && !/^\d+$/.test(w))
-    for (const word of words) {
-      freq[word] = (freq[word] || 0) + 1
+    const parts = splitSubject(row.summary)
+    if (parts.length >= 2) {
+      const issue = parts[1]
+      freq[issue] = (freq[issue] || 0) + 1
     }
   }
   return Object.entries(freq)
     .sort((a, b) => b[1] - a[1])
     .slice(0, topN)
-    .map(([word, count]) => ({ word, count }))
+    .map(([label, count]) => ({ label, count }))
+}
+
+function extractAffectedServices(rows, topN = 15) {
+  const freq = {}
+  for (const row of rows) {
+    const parts = splitSubject(row.summary)
+    if (parts.length >= 2) {
+      const service = parts[parts.length - 1]
+      freq[service] = (freq[service] || 0) + 1
+    }
+  }
+  return Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([label, count]) => ({ label, count }))
 }
 
 export default function JiraDashboard({ data, fileName }) {
@@ -152,8 +155,10 @@ export default function JiraDashboard({ data, fileName }) {
 
   const resolveRate = totalTickets > 0 ? Math.round((totalResolved / totalTickets) * 100) : 0
 
-  const topKeywords = extractTopKeywords(normalizedRows)
-  const maxKeywordCount = topKeywords[0]?.count || 1
+  const topIssues = extractTopIssues(normalizedRows)
+  const topServices = extractAffectedServices(normalizedRows)
+  const maxIssueCount = topIssues[0]?.count || 1
+  const maxServiceCount = topServices[0]?.count || 1
 
   return (
     <div className="jira-dashboard">
@@ -261,50 +266,89 @@ export default function JiraDashboard({ data, fileName }) {
         </div>
       </div>
 
-      {/* Most Common Issues */}
-      {topKeywords.length > 0 && (
+      {/* Most Common Issues + Affected Services */}
+      {(topIssues.length > 0 || topServices.length > 0) && (
         <div className="dashboard-section">
-          <div className="section-header">🔍 Most Common Issue Keywords</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
-            Top words from ticket summaries (stop words excluded)
+          <div className="section-header">🔍 Issue Analysis</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+            Extracted from ticket subject: <code>[key] - [issue] - [service]</code>
           </div>
-          <div className="data-table-wrapper">
-            <table className="data-table" style={{ maxWidth: 520 }}>
-              <thead>
-                <tr>
-                  <th style={{ width: 28 }}>#</th>
-                  <th>Keyword</th>
-                  <th className="number" style={{ width: 64 }}>Count</th>
-                  <th style={{ minWidth: 160 }}>Frequency</th>
-                </tr>
-              </thead>
-              <tbody>
-                {topKeywords.map(({ word, count }, i) => (
-                  <tr key={word}>
-                    <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{i + 1}</td>
-                    <td style={{ fontWeight: i < 3 ? 600 : 400 }}>{word}</td>
-                    <td className="number">{count}</td>
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <div style={{
-                          flex: 1, height: 10, background: 'var(--border)', borderRadius: 5, overflow: 'hidden'
-                        }}>
-                          <div style={{
-                            width: `${Math.round((count / maxKeywordCount) * 100)}%`,
-                            height: '100%',
-                            background: i < 3 ? 'var(--primary)' : 'var(--text-muted)',
-                            borderRadius: 5,
-                          }} />
-                        </div>
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', width: 34, textAlign: 'right' }}>
-                          {Math.round((count / totalTickets) * 100)}%
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+
+            {topIssues.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Most Common Issues</div>
+                <div className="data-table-wrapper">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 28 }}>#</th>
+                        <th>Issue</th>
+                        <th className="number" style={{ width: 52 }}>Count</th>
+                        <th style={{ minWidth: 100 }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {topIssues.map(({ label, count }, i) => (
+                        <tr key={label}>
+                          <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{i + 1}</td>
+                          <td style={{ fontWeight: i < 3 ? 600 : 400 }}>{label}</td>
+                          <td className="number">{count}</td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ flex: 1, height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+                                <div style={{ width: `${Math.round((count / maxIssueCount) * 100)}%`, height: '100%', background: i < 3 ? 'var(--primary)' : '#a5b4fc', borderRadius: 4 }} />
+                              </div>
+                              <span style={{ fontSize: 11, color: 'var(--text-muted)', width: 30, textAlign: 'right' }}>
+                                {Math.round((count / totalTickets) * 100)}%
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {topServices.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Affected Services</div>
+                <div className="data-table-wrapper">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 28 }}>#</th>
+                        <th>Service</th>
+                        <th className="number" style={{ width: 52 }}>Count</th>
+                        <th style={{ minWidth: 100 }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {topServices.map(({ label, count }, i) => (
+                        <tr key={label}>
+                          <td style={{ color: 'var(--text-muted)', fontSize: 12 }}>{i + 1}</td>
+                          <td style={{ fontWeight: i < 3 ? 600 : 400 }}>{label}</td>
+                          <td className="number">{count}</td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ flex: 1, height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+                                <div style={{ width: `${Math.round((count / maxServiceCount) * 100)}%`, height: '100%', background: i < 3 ? '#0891b2' : '#a5f3fc', borderRadius: 4 }} />
+                              </div>
+                              <span style={{ fontSize: 11, color: 'var(--text-muted)', width: 30, textAlign: 'right' }}>
+                                {Math.round((count / totalTickets) * 100)}%
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
       )}
