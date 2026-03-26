@@ -5,6 +5,8 @@
  *   2. Norwegian per-call log (one row per call, columns: Besvart, Besvart av, Varighet, …)
  */
 
+import { TEAM_CONFIG } from './workloadCalc'
+
 const AGENT_COLUMNS = ['agent name', 'agent', 'name', 'user', 'employee', 'representative']
 const TOTAL_CALLS_COLUMNS = ['total calls', 'calls', 'total', 'count', 'call count', 'num calls']
 const ANSWERED_COLUMNS = ['answered calls', 'answered', 'connected', 'picked up']
@@ -22,12 +24,25 @@ const NOR_ANSWERED_BY_COLUMNS = ['besvart av', 'answered by']
 const NOR_ANSWERED_COLUMNS    = ['besvart']
 const NOR_DURATION_COLUMNS    = ['varighet']
 const NOR_DATE_COLUMNS        = ['dato', 'date']
+const NOR_TIME_COLUMNS        = ['tid', 'time', 'tidspunkt', 'klokkeslett']
 
 function parseNorDate(str) {
   const m = String(str).trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
   if (!m) return null
   const d = new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]))
   return isNaN(d.getTime()) ? null : d
+}
+
+/** Parse "HH:MM" or "HH:MM:SS" → return hour 0-23, or null */
+function parseNorHour(str) {
+  const m = String(str || '').trim().match(/^(\d{1,2}):\d{2}/)
+  if (!m) return null
+  const h = parseInt(m[1])
+  return h >= 0 && h <= 23 ? h : null
+}
+
+function toDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 /**
@@ -88,7 +103,9 @@ function isNorwegianCallLog(lowerHeaders) {
 
 /**
  * Aggregate a Norwegian per-call log into per-agent summary rows.
- * Returns { agents, dateRange } where dateRange is { start: Date, end: Date } | null.
+ * Returns { agents, dateRange, dailyStats, hasOfficeHoursData }
+ * - dailyStats: array of { date, totalCalls, answeredCalls, officeHoursCalls, onCallCalls, totalDurationSeconds }
+ * - hasOfficeHoursData: true if time column was present and parseable
  */
 function parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap) {
   const get = (row, col) => col ? row[lowerKeyMap[col]] : null
@@ -96,31 +113,76 @@ function parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap) {
   const agentCol    = findColumn(lowerHeaders, NOR_ANSWERED_BY_COLUMNS)
   const durationCol = findColumn(lowerHeaders, NOR_DURATION_COLUMNS)
   const dateCol     = findColumn(lowerHeaders, NOR_DATE_COLUMNS)
+  const timeCol     = findColumn(lowerHeaders, NOR_TIME_COLUMNS)
 
   const agentMap = {}
+  const dailyMap = {}
   let minDate = null
   let maxDate = null
+  let hasOfficeHoursData = false
 
   for (const row of rows) {
     const agent    = String(get(row, agentCol) || '').trim()
     const duration = parseDurationToSeconds(get(row, durationCol))
+    const isAnswered = !!agent
 
-    // Track date range regardless of whether the call was answered
+    // Parse date
+    let dateStr = null
     if (dateCol) {
       const d = parseNorDate(String(get(row, dateCol) || ''))
       if (d) {
         if (!minDate || d < minDate) minDate = d
         if (!maxDate || d > maxDate) maxDate = d
+        dateStr = toDateStr(d)
+      }
+    }
+
+    // Parse time → office hours determination
+    let officeHours = null
+    if (timeCol) {
+      const hour = parseNorHour(String(get(row, timeCol) || ''))
+      if (hour !== null) {
+        hasOfficeHoursData = true
+        officeHours = hour >= TEAM_CONFIG.workStartHour && hour < TEAM_CONFIG.workEndHour
+      }
+    }
+
+    // Track daily stats (all calls, not just answered)
+    if (dateStr) {
+      if (!dailyMap[dateStr]) {
+        dailyMap[dateStr] = {
+          totalCalls: 0, answeredCalls: 0,
+          officeHoursCalls: 0, onCallCalls: 0,
+          totalDurationSeconds: 0,
+        }
+      }
+      dailyMap[dateStr].totalCalls++
+      if (isAnswered) {
+        dailyMap[dateStr].answeredCalls++
+        dailyMap[dateStr].totalDurationSeconds += duration
+        if (officeHours === true) dailyMap[dateStr].officeHoursCalls++
+        else if (officeHours === false) dailyMap[dateStr].onCallCalls++
       }
     }
 
     if (!agent) continue  // unanswered calls have no agent
 
     if (!agentMap[agent]) {
-      agentMap[agent] = { answeredCalls: 0, totalDurationSeconds: 0 }
+      agentMap[agent] = {
+        answeredCalls: 0, totalDurationSeconds: 0,
+        officeHoursCalls: 0, onCallCalls: 0,
+        officeHoursDurationSeconds: 0, onCallDurationSeconds: 0,
+      }
     }
     agentMap[agent].answeredCalls++
     agentMap[agent].totalDurationSeconds += duration
+    if (officeHours === true) {
+      agentMap[agent].officeHoursCalls++
+      agentMap[agent].officeHoursDurationSeconds += duration
+    } else if (officeHours === false) {
+      agentMap[agent].onCallCalls++
+      agentMap[agent].onCallDurationSeconds += duration
+    }
   }
 
   const agents = Object.entries(agentMap).map(([agent, stats]) => ({
@@ -132,20 +194,28 @@ function parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap) {
       ? Math.round(stats.totalDurationSeconds / stats.answeredCalls)
       : 0,
     totalDurationSeconds: stats.totalDurationSeconds,
+    officeHoursCalls: stats.officeHoursCalls,
+    onCallCalls: stats.onCallCalls,
+    officeHoursDurationSeconds: stats.officeHoursDurationSeconds,
+    onCallDurationSeconds: stats.onCallDurationSeconds,
   }))
 
+  const dailyStats = Object.entries(dailyMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, s]) => ({ date, ...s }))
+
   const dateRange = (minDate && maxDate) ? { start: minDate, end: maxDate } : null
-  return { agents, dateRange }
+  return { agents, dateRange, dailyStats, hasOfficeHoursData }
 }
 
 /**
  * Parse phone record CSV data
  * Handles both aggregate-per-agent and Norwegian per-call log formats.
  * @param {Array<Object>} rows - Parsed CSV rows from PapaParse
- * @returns {Array<Object>} Normalised agent records
+ * @returns { agents, dateRange, dailyStats, hasOfficeHoursData }
  */
 export function parsePhoneCSV(rows) {
-  if (!rows || rows.length === 0) return []
+  if (!rows || rows.length === 0) return { agents: [], dateRange: null, dailyStats: null, hasOfficeHoursData: false }
 
   const originalKeys = Object.keys(rows[0])
   const lowerKeyMap = {}
@@ -154,7 +224,7 @@ export function parsePhoneCSV(rows) {
 
   // Norwegian per-call log path
   if (isNorwegianCallLog(lowerHeaders)) {
-    return parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap)  // returns { agents, dateRange }
+    return parseNorwegianCallLog(rows, lowerHeaders, lowerKeyMap)
   }
 
   // Standard aggregate-per-agent path
@@ -186,11 +256,15 @@ export function parsePhoneCSV(rows) {
         missedCalls: Math.max(0, missedCalls),
         avgDurationSeconds,
         totalDurationSeconds: totalDurationSeconds || (avgDurationSeconds * totalCalls),
+        officeHoursCalls: 0,
+        onCallCalls: 0,
+        officeHoursDurationSeconds: 0,
+        onCallDurationSeconds: 0,
       }
     })
     .filter(r => r.agent)
 
-  return { agents, dateRange: null }
+  return { agents, dateRange: null, dailyStats: null, hasOfficeHoursData: false }
 }
 
 /**

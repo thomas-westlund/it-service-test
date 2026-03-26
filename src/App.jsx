@@ -5,6 +5,8 @@ import { parsePhoneCSV, detectPhoneCSV } from './utils/phoneParser'
 import { normalizeJiraRows, detectJiraCSV, filterJiraByMonth, filterJiraByDateRange, aggregateJiraRows } from './utils/jiraParser'
 import { samplePhoneData, sampleMarchJiraRows, seedSampleHistory } from './utils/sampleData'
 import { loadHistory, saveMonthToHistory, deleteFromHistory, formatPeriodLabel, currentPeriod } from './utils/historyStorage'
+import { loadIgnoredAgents, saveIgnoredAgents } from './utils/ignoredAgents'
+import { nameMatchKey } from './utils/workloadCalc'
 import FileUploadZone from './components/FileUploadZone'
 import PhoneDashboard from './components/PhoneDashboard'
 import JiraDashboard from './components/JiraDashboard'
@@ -14,7 +16,10 @@ import MonthComparison from './components/MonthComparison'
 export default function App() {
   const [phoneData, setPhoneData] = useState(null)
   const [phoneDateRange, setPhoneDateRange] = useState(null)  // { start: Date, end: Date } | null
+  const [phoneDailyStats, setPhoneDailyStats] = useState(null)
+  const [phoneHasOfficeHoursData, setPhoneHasOfficeHoursData] = useState(false)
   const [phoneFileName, setPhoneFileName] = useState('')
+  const [ignoredAgents, setIgnoredAgents] = useState(loadIgnoredAgents)
   const [jiraRawRows, setJiraRawRows] = useState(null)   // normalized, unfiltered
   const [jiraFileName, setJiraFileName] = useState('')
   const [selectedPeriod, setSelectedPeriod] = useState(currentPeriod)
@@ -64,6 +69,8 @@ export default function App() {
       const result = parsePhoneCSV(parsedData)
       setPhoneData(result.agents)
       setPhoneDateRange(result.dateRange)
+      setPhoneDailyStats(result.dailyStats || null)
+      setPhoneHasOfficeHoursData(result.hasOfficeHoursData || false)
       if (result.dateRange) {
         const d = result.dateRange.start
         setSelectedPeriod(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
@@ -75,11 +82,23 @@ export default function App() {
     }
   }, [])
 
+  const handleToggleIgnored = useCallback((key) => {
+    setIgnoredAgents(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      saveIgnoredAgents(next)
+      return next
+    })
+  }, [])
+
   const handleLoadSample = () => {
     seedSampleHistory()
     setHistory(loadHistory())
     setPhoneData(samplePhoneData)
     setPhoneDateRange(null)
+    setPhoneDailyStats(null)
+    setPhoneHasOfficeHoursData(false)
     setPhoneFileName('sample-phone-march-2026.csv')
     setJiraRawRows(sampleMarchJiraRows)
     setJiraFileName('sample-jira-march-2026.csv')
@@ -91,6 +110,8 @@ export default function App() {
   const handleClearAll = () => {
     setPhoneData(null)
     setPhoneDateRange(null)
+    setPhoneDailyStats(null)
+    setPhoneHasOfficeHoursData(false)
     setPhoneFileName('')
     setJiraRawRows(null)
     setJiraFileName('')
@@ -113,6 +134,8 @@ export default function App() {
     if (!entry) return
     if (entry.phoneData) {
       setPhoneData(entry.phoneData)
+      setPhoneDailyStats(null)
+      setPhoneHasOfficeHoursData(false)
       setPhoneFileName(`history-${period}`)
     }
     if (entry.jiraRawRows) {
@@ -135,6 +158,24 @@ export default function App() {
 
   const historyPeriods = Object.keys(history).sort().reverse()
   const hasData = !!(phoneData || jiraRawRows)
+
+  // Deduplicated agent list (by nameMatchKey) for the ignore UI
+  const allAgentEntries = useMemo(() => {
+    const keyToName = {}
+    if (phoneData) {
+      phoneData.forEach(a => {
+        const k = nameMatchKey(a.agent)
+        if (!keyToName[k] || a.agent.length > keyToName[k].length) keyToName[k] = a.agent
+      })
+    }
+    if (jiraData?.byAssignee) {
+      Object.keys(jiraData.byAssignee).forEach(n => {
+        const k = nameMatchKey(n)
+        if (!keyToName[k] || n.length > keyToName[k].length) keyToName[k] = n
+      })
+    }
+    return Object.entries(keyToName).sort(([, a], [, b]) => a.localeCompare(b))
+  }, [phoneData, jiraData])
 
   const availableTabs = []
   if (phoneData) availableTabs.push('phone')
@@ -270,6 +311,28 @@ export default function App() {
           </div>
         )}
 
+        {/* Team Members — ignore filter */}
+        {hasData && allAgentEntries.length > 0 && (
+          <div className="team-filter-panel">
+            <div className="team-filter-header">
+              <span className="team-filter-title">👥 Team Members</span>
+              <span className="team-filter-hint">Uncheck to exclude from workload calculations</span>
+            </div>
+            <div className="team-filter-list">
+              {allAgentEntries.map(([key, name]) => (
+                <label key={key} className={`team-filter-item${ignoredAgents.has(key) ? ' ignored' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={!ignoredAgents.has(key)}
+                    onChange={() => handleToggleIgnored(key)}
+                  />
+                  {name}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Tab Navigation */}
         {hasData && (
           <div className="tab-nav">
@@ -318,7 +381,14 @@ export default function App() {
           <JiraDashboard data={jiraData} fileName={jiraFileName} />
         )}
         {currentTab === 'workload' && phoneData && jiraData && (
-          <WorkloadDashboard phoneData={phoneData} jiraData={jiraData} />
+          <WorkloadDashboard
+            phoneData={phoneData}
+            jiraData={jiraData}
+            phoneDailyStats={phoneDailyStats}
+            phoneHasOfficeHoursData={phoneHasOfficeHoursData}
+            ignoredAgents={ignoredAgents}
+            onToggleIgnored={handleToggleIgnored}
+          />
         )}
         {currentTab === 'compare' && compareWith && compareEntry && (
           <MonthComparison
@@ -328,6 +398,7 @@ export default function App() {
             comparePeriod={compareWith}
             comparePhone={compareEntry.phoneData}
             compareJira={compareJiraData}
+            ignoredAgents={ignoredAgents}
           />
         )}
       </main>

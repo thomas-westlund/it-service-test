@@ -12,7 +12,18 @@ export const TEAM_CONFIG = {
   breakMinutesPerHour: 5,        // 5 min break per hour
   vacationWeeks: 4,              // 4 weeks vacation per year
   workStartHour: 8,              // start at 08:00
+  workEndHour: 16,               // end at 16:00 (8h day)
   onCallLeaveHour: 14,           // on-call day: leave at 14:00
+}
+
+/**
+ * Return true if a Unix timestamp falls within configured office hours.
+ * Returns null when timestamp is falsy.
+ */
+export function isOfficeHours(timestamp) {
+  if (!timestamp) return null
+  const hour = new Date(timestamp).getHours()
+  return hour >= TEAM_CONFIG.workStartHour && hour < TEAM_CONFIG.workEndHour
 }
 
 // Workload estimation ranges

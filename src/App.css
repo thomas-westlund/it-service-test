@@ -702,3 +702,63 @@ body {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* Team Members filter panel */
+.team-filter-panel {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.team-filter-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.team-filter-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.team-filter-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.team-filter-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.team-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  transition: background 0.1s;
+}
+
+.team-filter-item:hover {
+  background: var(--bg);
+}
+
+.team-filter-item.ignored {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.team-filter-item input[type="checkbox"] {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--primary);
+}

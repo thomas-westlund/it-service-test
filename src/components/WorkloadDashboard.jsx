@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer
+  ResponsiveContainer, ComposedChart, Line, Legend, ReferenceLine
 } from 'recharts'
 import StatCard from './StatCard'
 import {
@@ -20,6 +20,14 @@ function scoreColor(pct) {
   if (pct >= 70) return 'var(--warning)'
   if (pct >= 40) return 'var(--success)'
   return 'var(--primary)'
+}
+
+function fmtDate(dateStr) {
+  // "2026-03-05" → "5 Mar"
+  const [, , d] = dateStr.split('-')
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const mIdx = parseInt(dateStr.split('-')[1]) - 1
+  return `${parseInt(d)} ${months[mIdx]}`
 }
 
 const WorkloadTooltip = ({ active, payload }) => {
@@ -41,7 +49,21 @@ const WorkloadTooltip = ({ active, payload }) => {
   )
 }
 
-export default function WorkloadDashboard({ phoneData, jiraData }) {
+const CapacityTooltip = ({ active, payload }) => {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  const pct = Math.round((d.workload / (d.workload + d.remaining)) * 100)
+  return (
+    <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', boxShadow: 'var(--shadow-md)', fontSize: 12 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{d.fullName}</div>
+      <div style={{ color: scoreColor(pct) }}>Workload: <strong>{formatMinutes(d.workload)}</strong> ({pct}%)</div>
+      <div style={{ color: 'var(--success)' }}>Remaining: <strong>{formatMinutes(Math.max(0, d.remaining))}</strong></div>
+    </div>
+  )
+}
+
+export default function WorkloadDashboard({ phoneData, jiraData, phoneDailyStats, phoneHasOfficeHoursData, ignoredAgents, onToggleIgnored }) {
   const [afterCallMid, setAfterCallMid] = useState(WORKLOAD_DEFAULTS.afterCallMid)
   const [ticketMid, setTicketMid] = useState(WORKLOAD_DEFAULTS.ticketMid)
 
@@ -61,14 +83,30 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
     const allNames = new Set([...Object.keys(phoneMap), ...Object.keys(jiraMap)])
     const settings = { afterCallMid, ticketMid }
 
-    return Array.from(allNames).map(key => {
-      const phone = phoneMap[key] || null
-      const jiraEntry = jiraMap[key] || null
-      const displayName = phone?.agent || jiraEntry?.name || key
-      const wl = calculateAgentWorkload(phone, jiraEntry?.stats, settings)
-      return { displayName, phone, jiraStats: jiraEntry?.stats || null, wl, hasPhone: !!phone, hasJira: !!jiraEntry }
-    }).sort((a, b) => b.wl.totalMid - a.wl.totalMid)
-  }, [phoneData, jiraData, afterCallMid, ticketMid])
+    return Array.from(allNames)
+      .filter(key => !ignoredAgents?.has(key))
+      .map(key => {
+        const phone = phoneMap[key] || null
+        const jiraEntry = jiraMap[key] || null
+        const displayName = phone?.agent || jiraEntry?.name || key
+        const wl = calculateAgentWorkload(phone, jiraEntry?.stats, settings)
+        return { displayName, phone, jiraStats: jiraEntry?.stats || null, wl, hasPhone: !!phone, hasJira: !!jiraEntry }
+      }).sort((a, b) => b.wl.totalMid - a.wl.totalMid)
+  }, [phoneData, jiraData, afterCallMid, ticketMid, ignoredAgents])
+
+  // All known agents for the ignore UI (union from both sources)
+  const allAgentEntries = useMemo(() => {
+    const keyToName = {}
+    if (phoneData) phoneData.forEach(a => {
+      const k = nameMatchKey(a.agent)
+      if (!keyToName[k] || a.agent.length > keyToName[k].length) keyToName[k] = a.agent
+    })
+    if (jiraData?.byAssignee) Object.keys(jiraData.byAssignee).forEach(n => {
+      const k = nameMatchKey(n)
+      if (!keyToName[k] || n.length > keyToName[k].length) keyToName[k] = n
+    })
+    return Object.entries(keyToName).sort(([, a], [, b]) => a.localeCompare(b))
+  }, [phoneData, jiraData])
 
   const totalQuickResolved = jiraData?.totalQuickResolved ?? 0
   const avgResolveTime = jiraData?.avgResolveTimeMinutes ?? null
@@ -95,8 +133,81 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
   const avgWorkloadMid = teamTotalMid / agentCount
   const monthlyNetMinutes = capacity.netMinutesPerDay * 21
 
+  // Remaining capacity chart data
+  const capacityChartData = agentRows.map(r => {
+    const workload = Math.round(r.wl.totalMid)
+    const remaining = Math.max(0, Math.round(monthlyNetMinutes - workload))
+    return {
+      name: shortenName(r.displayName),
+      fullName: r.displayName,
+      workload,
+      remaining,
+    }
+  })
+
+  // Daily activity chart — merge phone daily stats + jira daily stats
+  const dailyChartData = useMemo(() => {
+    const map = {}
+
+    if (phoneDailyStats) {
+      for (const d of phoneDailyStats) {
+        map[d.date] = { date: d.date, calls: d.answeredCalls, tickets: 0, phoneWorkload: 0 }
+        // Estimate phone workload for that day
+        const totalPhoneMin = d.totalDurationSeconds / 60 + d.answeredCalls * afterCallMid
+        map[d.date].phoneWorkload = Math.round(totalPhoneMin)
+      }
+    }
+
+    if (jiraData?.jiraDailyStats) {
+      for (const d of jiraData.jiraDailyStats) {
+        if (!map[d.date]) map[d.date] = { date: d.date, calls: 0, tickets: 0, phoneWorkload: 0 }
+        map[d.date].tickets += d.created || 0
+      }
+    }
+
+    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date))
+  }, [phoneDailyStats, jiraData, afterCallMid])
+
+  // On-call stats
+  const phoneOfficeHoursCalls = agentRows.reduce((s, r) => s + (r.phone?.officeHoursCalls || 0), 0)
+  const phoneOnCallCalls = agentRows.reduce((s, r) => s + (r.phone?.onCallCalls || 0), 0)
+  const phoneOfficeHoursDuration = agentRows.reduce((s, r) => s + (r.phone?.officeHoursDurationSeconds || 0), 0)
+  const phoneOnCallDuration = agentRows.reduce((s, r) => s + (r.phone?.onCallDurationSeconds || 0), 0)
+  const officeHoursStats = jiraData?.officeHoursStats
+  const showOnCallSection = phoneHasOfficeHoursData || officeHoursStats?.hasOfficeHoursData
+
   return (
     <div className="workload-dashboard">
+
+      {/* Team Members — ignore filter */}
+      {allAgentEntries.length > 0 && (
+        <div className="dashboard-section" style={{ marginTop: 16 }}>
+          <div className="section-header">👥 Team Members</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', padding: '4px 0' }}>
+            {allAgentEntries.map(([key, name]) => (
+              <label key={key} style={{
+                display: 'flex', alignItems: 'center', gap: 6, fontSize: 13,
+                cursor: 'pointer', padding: '4px 8px', borderRadius: 4,
+                border: '1px solid var(--border)',
+                background: ignoredAgents?.has(key) ? 'var(--bg)' : 'white',
+                color: ignoredAgents?.has(key) ? 'var(--text-muted)' : 'var(--text-primary)',
+                textDecoration: ignoredAgents?.has(key) ? 'line-through' : 'none',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={!ignoredAgents?.has(key)}
+                  onChange={() => onToggleIgnored?.(key)}
+                  style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
+                />
+                {name}
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+            Unchecked agents are excluded from all workload calculations. Setting is remembered.
+          </div>
+        </div>
+      )}
 
       {/* Assumptions */}
       <div className="dashboard-section" style={{ marginTop: 16 }}>
@@ -207,7 +318,7 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
         </div>
       </div>
 
-      {/* Chart */}
+      {/* Workload chart */}
       <div className="dashboard-section">
         <div className="section-header">📈 Estimated Workload Per Agent</div>
         <div className="workload-legend">
@@ -233,6 +344,134 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {/* Remaining Capacity chart */}
+      <div className="dashboard-section">
+        <div className="section-header">🔋 Remaining Capacity Per Agent</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+          Based on ~{formatMinutes(monthlyNetMinutes)} net monthly capacity (21 working days). Mid workload estimate.
+        </div>
+        <div className="chart-card">
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={capacityChartData} margin={{ top: 4, right: 8, left: -10, bottom: 40 }} layout="vertical">
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={v => `${v}m`} />
+              <YAxis dataKey="name" type="category" tick={{ fontSize: 11 }} width={72} />
+              <Tooltip content={<CapacityTooltip />} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="workload" stackId="c" fill="#6366f1" name="Workload" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="remaining" stackId="c" fill="#d1fae5" name="Remaining" radius={[0, 3, 3, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, paddingLeft: 4 }}>
+          Team remaining: <strong>{formatMinutes(Math.max(0, monthlyNetMinutes * agentCount - teamTotalMid))}</strong> of <strong>{formatMinutes(monthlyNetMinutes * agentCount)}</strong> total capacity
+        </div>
+      </div>
+
+      {/* Daily Activity */}
+      {dailyChartData.length > 0 && (
+        <div className="dashboard-section">
+          <div className="section-header">📅 Daily Activity Breakdown</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+            Calls answered and tickets created per calendar day
+          </div>
+          <div className="chart-card">
+            <ResponsiveContainer width="100%" height={280}>
+              <ComposedChart data={dailyChartData} margin={{ top: 4, right: 16, left: -10, bottom: 40 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} angle={-45} textAnchor="end" interval={0} tickFormatter={fmtDate} />
+                <YAxis yAxisId="left" tick={{ fontSize: 11 }} allowDecimals={false} />
+                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip
+                  labelFormatter={fmtDate}
+                  formatter={(v, name) => [v, name]}
+                />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar yAxisId="left" dataKey="calls" fill="#6366f1" name="Calls answered" radius={[2, 2, 0, 0]} />
+                <Bar yAxisId="right" dataKey="tickets" fill="#0891b2" name="Tickets created" radius={[2, 2, 0, 0]} opacity={0.8} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* On-Call vs Office Hours */}
+      {showOnCallSection && (
+        <div className="dashboard-section">
+          <div className="section-header">🌙 On-Call vs Office Hours Workload</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+            Office hours: {TEAM_CONFIG.workStartHour}:00–{TEAM_CONFIG.workEndHour}:00
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+
+            {phoneHasOfficeHoursData && (
+              <div className="chart-card" style={{ padding: 16 }}>
+                <div className="chart-title" style={{ marginBottom: 12 }}>📞 Phone Calls</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg)', borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Office Hours</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--primary)' }}>{phoneOfficeHoursCalls}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>calls · {formatMinutes(phoneOfficeHoursDuration / 60)}</div>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg)', borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>On-Call</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--warning)' }}>{phoneOnCallCalls}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>calls · {formatMinutes(phoneOnCallDuration / 60)}</div>
+                  </div>
+                </div>
+                {(phoneOfficeHoursCalls + phoneOnCallCalls) > 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ height: 8, background: 'var(--border)', borderRadius: 4, overflow: 'hidden', display: 'flex' }}>
+                      <div style={{ width: `${Math.round(phoneOfficeHoursCalls / (phoneOfficeHoursCalls + phoneOnCallCalls) * 100)}%`, background: 'var(--primary)', borderRadius: '4px 0 0 4px' }} />
+                      <div style={{ flex: 1, background: 'var(--warning)', borderRadius: '0 4px 4px 0' }} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                      <span>{Math.round(phoneOfficeHoursCalls / (phoneOfficeHoursCalls + phoneOnCallCalls) * 100)}% office hours</span>
+                      <span>{Math.round(phoneOnCallCalls / (phoneOfficeHoursCalls + phoneOnCallCalls) * 100)}% on-call</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {officeHoursStats?.hasOfficeHoursData && (
+              <div className="chart-card" style={{ padding: 16 }}>
+                <div className="chart-title" style={{ marginBottom: 12 }}>🎫 Jira Tickets</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Created</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                      <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Office</div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--primary)' }}>{officeHoursStats.officeHoursCreated}</div>
+                      </div>
+                      <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>On-Call</div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--warning)' }}>{officeHoursStats.onCallCreated}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Resolved</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                      <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Office</div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--success)' }}>{officeHoursStats.officeHoursResolved}</div>
+                      </div>
+                      <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>On-Call</div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--warning)' }}>{officeHoursStats.onCallResolved}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      )}
 
       {/* Per-Agent Table */}
       <div className="dashboard-section">

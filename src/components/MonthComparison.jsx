@@ -23,7 +23,7 @@ function DeltaBadge({ value, unit = '', invert = false }) {
   return <span style={{ color, fontWeight: 600, fontSize: 11 }}>{sign}{Math.round(value)}{unit}</span>
 }
 
-function buildAgentWorkloads(phoneData, jiraData) {
+function buildAgentWorkloads(phoneData, jiraData, ignoredAgents) {
   const phoneMap = {}
   if (phoneData) phoneData.forEach(a => { phoneMap[nameMatchKey(a.agent)] = a })
 
@@ -36,22 +36,24 @@ function buildAgentWorkloads(phoneData, jiraData) {
 
   const allNames = new Set([...Object.keys(phoneMap), ...Object.keys(jiraMap)])
   const result = {}
-  Array.from(allNames).forEach(key => {
-    const phone = phoneMap[key] || null
-    const jiraEntry = jiraMap[key] || null
-    const displayName = phone?.agent || jiraEntry?.name || key
-    const wl = calculateAgentWorkload(phone, jiraEntry?.stats, WORKLOAD_DEFAULTS)
-    result[nameMatchKey(displayName)] = { displayName, phone, jiraStats: jiraEntry?.stats || null, wl }
-  })
+  Array.from(allNames)
+    .filter(key => !ignoredAgents?.has(key))
+    .forEach(key => {
+      const phone = phoneMap[key] || null
+      const jiraEntry = jiraMap[key] || null
+      const displayName = phone?.agent || jiraEntry?.name || key
+      const wl = calculateAgentWorkload(phone, jiraEntry?.stats, WORKLOAD_DEFAULTS)
+      result[nameMatchKey(displayName)] = { displayName, phone, jiraStats: jiraEntry?.stats || null, wl }
+    })
   return result
 }
 
-export default function MonthComparison({ currentPeriod, currentPhone, currentJira, comparePeriod, comparePhone, compareJira }) {
+export default function MonthComparison({ currentPeriod, currentPhone, currentJira, comparePeriod, comparePhone, compareJira, ignoredAgents }) {
   const capacity = useMemo(() => computeCapacity(TEAM_CONFIG), [])
   const monthlyNetMinutes = capacity.netMinutesPerDay * 21
 
-  const currentWls = useMemo(() => buildAgentWorkloads(currentPhone, currentJira), [currentPhone, currentJira])
-  const compareWls = useMemo(() => buildAgentWorkloads(comparePhone, compareJira), [comparePhone, compareJira])
+  const currentWls = useMemo(() => buildAgentWorkloads(currentPhone, currentJira, ignoredAgents), [currentPhone, currentJira, ignoredAgents])
+  const compareWls = useMemo(() => buildAgentWorkloads(comparePhone, compareJira, ignoredAgents), [comparePhone, compareJira, ignoredAgents])
 
   // All agent names from both periods
   const allAgents = useMemo(() => {

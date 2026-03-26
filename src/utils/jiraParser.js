@@ -2,6 +2,19 @@
  * Jira export CSV parser utility
  */
 
+import { TEAM_CONFIG } from './workloadCalc'
+
+function isOfficeHoursTs(ts) {
+  if (!ts) return null
+  const hour = new Date(ts).getHours()
+  return hour >= TEAM_CONFIG.workStartHour && hour < TEAM_CONFIG.workEndHour
+}
+
+function toDateStr(ts) {
+  const d = new Date(ts)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 const ASSIGNEE_COLUMNS = ['assignee', 'assigned to', 'owner', 'responsible']
 const STATUS_COLUMNS = ['status', 'state', 'issue status']
 const TYPE_COLUMNS = ['issue type', 'issuetype', 'type', 'kind']
@@ -187,6 +200,11 @@ export function aggregateJiraRows(normalizedRows) {
   const byAssignee = {}
   const statusCounts = {}
   const priorityCounts = {}
+  const dailyMap = {}
+
+  // Global office-hours counters
+  let officeHoursCreated = 0, onCallCreated = 0
+  let officeHoursResolved = 0, onCallResolved = 0
 
   for (const issue of normalizedRows) {
     const name = issue.assignee
@@ -215,10 +233,35 @@ export function aggregateJiraRows(normalizedRows) {
       a.qualifyingTickets++
     }
 
+    // Office-hours classification (computed from createdTs if flag not on row)
+    const createdOH = issue.createdOfficeHours ?? isOfficeHoursTs(issue.createdTs)
+    if (createdOH === true) officeHoursCreated++
+    else if (createdOH === false) onCallCreated++
+
+    // Daily stats (created date)
+    if (issue.createdTs) {
+      const dateStr = toDateStr(issue.createdTs)
+      if (!dailyMap[dateStr]) dailyMap[dateStr] = { created: 0, resolved: 0, officeHoursCreated: 0, onCallCreated: 0, officeHoursResolved: 0, onCallResolved: 0 }
+      dailyMap[dateStr].created++
+      if (createdOH === true) dailyMap[dateStr].officeHoursCreated++
+      else if (createdOH === false) dailyMap[dateStr].onCallCreated++
+    }
+
     if (isResolved(issue.status)) {
       a.resolvedTickets++
       if (!issue.quickResolved && issue.resolveTimeMinutes != null) {
         a._resolveTimes.push(issue.resolveTimeMinutes)
+      }
+      const resolvedOH = issue.resolvedOfficeHours ?? isOfficeHoursTs(issue.resolvedTs)
+      if (resolvedOH === true) officeHoursResolved++
+      else if (resolvedOH === false) onCallResolved++
+
+      if (issue.resolvedTs) {
+        const dateStr = toDateStr(issue.resolvedTs)
+        if (!dailyMap[dateStr]) dailyMap[dateStr] = { created: 0, resolved: 0, officeHoursCreated: 0, onCallCreated: 0, officeHoursResolved: 0, onCallResolved: 0 }
+        dailyMap[dateStr].resolved++
+        if (resolvedOH === true) dailyMap[dateStr].officeHoursResolved++
+        else if (resolvedOH === false) dailyMap[dateStr].onCallResolved++
       }
     } else {
       a.openTickets++
@@ -254,7 +297,23 @@ export function aggregateJiraRows(normalizedRows) {
 
   const totalQuickResolved = normalizedRows.filter(r => r.quickResolved).length
 
-  return { normalizedRows, byAssignee, statusCounts, priorityCounts, avgResolveTimeMinutes, totalQuickResolved }
+  const jiraDailyStats = Object.entries(dailyMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, s]) => ({ date, ...s }))
+
+  const hasOfficeHoursData = normalizedRows.some(r => r.createdTs != null)
+
+  const officeHoursStats = {
+    officeHoursCreated, onCallCreated,
+    officeHoursResolved, onCallResolved,
+    hasOfficeHoursData,
+  }
+
+  return {
+    normalizedRows, byAssignee, statusCounts, priorityCounts,
+    avgResolveTimeMinutes, totalQuickResolved,
+    jiraDailyStats, officeHoursStats,
+  }
 }
 
 /**
