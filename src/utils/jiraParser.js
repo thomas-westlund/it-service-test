@@ -211,8 +211,6 @@ export function aggregateJiraRows(normalizedRows) {
     if (!byAssignee[name]) {
       byAssignee[name] = {
         totalTickets: 0,
-        qualifyingTickets: 0,      // excludes quick-resolved
-        quickResolvedCount: 0,
         openTickets: 0,
         resolvedTickets: 0,
         ticketsByStatus: {},
@@ -220,18 +218,12 @@ export function aggregateJiraRows(normalizedRows) {
         ticketsByType: {},
         totalTimeSpentSeconds: 0,
         totalStoryPoints: 0,
-        _resolveTimes: [],          // temp, removed before return
+        resolveTimesArr: [],        // resolve time (minutes) for all resolved tickets with timestamps
       }
     }
 
     const a = byAssignee[name]
     a.totalTickets++
-
-    if (issue.quickResolved) {
-      a.quickResolvedCount++
-    } else {
-      a.qualifyingTickets++
-    }
 
     // Office-hours classification (computed from createdTs if flag not on row)
     const createdOH = issue.createdOfficeHours ?? isOfficeHoursTs(issue.createdTs)
@@ -249,8 +241,8 @@ export function aggregateJiraRows(normalizedRows) {
 
     if (isResolved(issue.status)) {
       a.resolvedTickets++
-      if (!issue.quickResolved && issue.resolveTimeMinutes != null) {
-        a._resolveTimes.push(issue.resolveTimeMinutes)
+      if (issue.resolveTimeMinutes != null) {
+        a.resolveTimesArr.push(issue.resolveTimeMinutes)
       }
       const resolvedOH = issue.resolvedOfficeHours ?? isOfficeHoursTs(issue.resolvedTs)
       if (resolvedOH === true) officeHoursResolved++
@@ -277,25 +269,8 @@ export function aggregateJiraRows(normalizedRows) {
     priorityCounts[issue.priority] = (priorityCounts[issue.priority] || 0) + 1
   }
 
-  // Compute per-agent avg resolve time and clean up temp field
-  for (const a of Object.values(byAssignee)) {
-    if (a._resolveTimes.length > 0) {
-      a.avgResolveTimeMinutes = a._resolveTimes.reduce((s, v) => s + v, 0) / a._resolveTimes.length
-    } else {
-      a.avgResolveTimeMinutes = null
-    }
-    delete a._resolveTimes
-  }
-
-  // Global avg resolve time (non-quick, resolved tickets only)
-  const allResolveTimes = normalizedRows
-    .filter(r => !r.quickResolved && isResolved(r.status) && r.resolveTimeMinutes != null)
-    .map(r => r.resolveTimeMinutes)
-  const avgResolveTimeMinutes = allResolveTimes.length > 0
-    ? allResolveTimes.reduce((s, v) => s + v, 0) / allResolveTimes.length
-    : null
-
-  const totalQuickResolved = normalizedRows.filter(r => r.quickResolved).length
+  // No static avg resolve time or quick-resolved count — these are computed
+  // dynamically in calculateAgentWorkload using a threshold derived from slider values.
 
   const jiraDailyStats = Object.entries(dailyMap)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -311,7 +286,6 @@ export function aggregateJiraRows(normalizedRows) {
 
   return {
     normalizedRows, byAssignee, statusCounts, priorityCounts,
-    avgResolveTimeMinutes, totalQuickResolved,
     jiraDailyStats, officeHoursStats,
   }
 }

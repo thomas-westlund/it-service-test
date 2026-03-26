@@ -130,8 +130,13 @@ export default function WorkloadDashboard({
     return Object.entries(keyToName).sort(([, a], [, b]) => a.localeCompare(b))
   }, [phoneData, jiraData])
 
-  const totalQuickResolved = jiraData?.totalQuickResolved ?? 0
-  const avgResolveTime = jiraData?.avgResolveTimeMinutes ?? null
+  // Derived dynamically from agentRows so they update when the slider changes
+  const totalQuickResolved = agentRows.reduce((s, r) => s + (r.wl.quickCount || 0), 0)
+  const avgResolveTime = (() => {
+    const validAgents = agentRows.filter(r => r.wl.avgResolveTimeMinutes != null)
+    if (validAgents.length === 0) return null
+    return validAgents.reduce((s, r) => s + r.wl.avgResolveTimeMinutes, 0) / validAgents.length
+  })()
 
   const chartData = agentRows.map(r => ({
     name: shortenName(r.displayName),
@@ -255,7 +260,7 @@ export default function WorkloadDashboard({
               <span className="slider-value">{afterCallMid}m</span>
             </div>
             <div className="assumption-note">
-              Quick-resolved tickets (&lt;20 min): avg call ({formatMinutes(teamAvgCallMin)}) + <strong>{afterCallMid}m</strong> = <strong>~{formatMinutes(quickPerTicketMid)}/ticket</strong>
+              Quick threshold: avg call ({formatMinutes(teamAvgCallMin)}) + <strong>{afterCallMid}m</strong> = <strong>~{formatMinutes(quickPerTicketMid)}</strong> — tickets resolved faster count as phone work
             </div>
           </div>
 
@@ -340,7 +345,7 @@ export default function WorkloadDashboard({
           <StatCard
             title="Quick-Resolved Tickets"
             value={totalQuickResolved}
-            subtitle={`~${formatMinutes(quickPerTicketMid)}/ticket (avg call ${formatMinutes(teamAvgCallMin)} + ${afterCallMid}m after-call)`}
+            subtitle={`Resolved < ~${formatMinutes(quickPerTicketMid)} (avg call ${formatMinutes(teamAvgCallMin)} + ${afterCallMid}m)`}
             color="#7c3aed"
           />
           <StatCard
@@ -368,7 +373,7 @@ export default function WorkloadDashboard({
           </div>
           <div className="workload-legend-item">
             <div className="workload-legend-dot" style={{ background: '#a78bfa' }} />
-            Quick tickets (≈ avg call + {afterCallMid}m after-call each)
+            Quick tickets (resolved &lt; ~{formatMinutes(quickPerTicketMid)}, ≈ avg call + {afterCallMid}m after-call each)
           </div>
           <div className="workload-legend-item">
             <div className="workload-legend-dot" style={{ background: '#0891b2' }} />

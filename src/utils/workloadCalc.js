@@ -103,17 +103,25 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
     avgCallMin = answered > 0 ? phoneCallMinutes / answered : 0
   }
 
-  // Qualifying ticket workload
+  // Dynamic quick-resolve threshold: tickets resolved faster than this count as phone-like work
+  const quickThreshold = avgCallMin + s.afterCallMid
+
+  // Qualifying ticket workload — split is dynamic based on quickThreshold
   let ticketCount = 0, quickCount = 0
   let ticketLow = 0, ticketMid = 0, ticketHigh = 0
   let quickLow = 0, quickMid = 0, quickHigh = 0
   let avgResolveTimeMinutes = null
   if (jiraStats) {
-    ticketCount = jiraStats.qualifyingTickets ?? jiraStats.totalTickets ?? 0
-    quickCount = jiraStats.quickResolvedCount ?? 0
+    const times = jiraStats.resolveTimesArr || []
+    // tickets without a resolve timestamp (unresolved or missing dates) count as regular ticket work
+    const unknownCount = (jiraStats.totalTickets || 0) - times.length
+    quickCount = times.filter(t => t < quickThreshold).length
+    ticketCount = times.filter(t => t >= quickThreshold).length + unknownCount
+
     ticketLow = ticketCount * s.ticketLow
     ticketMid = ticketCount * s.ticketMid
     ticketHigh = ticketCount * s.ticketHigh
+
     // Quick-resolved: ≈ avg call duration + after-call work per ticket
     const qLow = avgCallMin + s.afterCallLow
     const qMid = avgCallMin + s.afterCallMid
@@ -121,7 +129,12 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
     quickLow = quickCount * qLow
     quickMid = quickCount * qMid
     quickHigh = quickCount * qHigh
-    avgResolveTimeMinutes = jiraStats.avgResolveTimeMinutes ?? null
+
+    // Avg resolve time for regular (non-quick) tickets only
+    const regularTimes = times.filter(t => t >= quickThreshold)
+    avgResolveTimeMinutes = regularTimes.length > 0
+      ? regularTimes.reduce((a, t) => a + t, 0) / regularTimes.length
+      : null
   }
 
   return {
