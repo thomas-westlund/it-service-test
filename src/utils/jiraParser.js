@@ -67,11 +67,15 @@ function parseDate(value) {
   const d = new Date(str)
   if (!isNaN(d.getTime())) return d
 
-  // Jira legacy: "15/Mar/26 09:30" or "15/Mar/2026"
-  const dmyMatch = str.match(/^(\d{1,2})\/(\w{3})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2}))?/)
+  // Jira legacy: "15/Mar/26 09:30", "15/Mar/26 8:37 PM", or "15/Mar/2026"
+  const dmyMatch = str.match(/^(\d{1,2})\/(\w{3})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?)?/i)
   if (dmyMatch) {
     const year = dmyMatch[3].length === 2 ? `20${dmyMatch[3]}` : dmyMatch[3]
-    const time = dmyMatch[4] ? `${dmyMatch[4]}:${dmyMatch[5]}:00` : '00:00:00'
+    let hour = dmyMatch[4] ? parseInt(dmyMatch[4]) : 0
+    const ampm = dmyMatch[6] ? dmyMatch[6].toUpperCase() : null
+    if (ampm === 'AM' && hour === 12) hour = 0
+    if (ampm === 'PM' && hour !== 12) hour += 12
+    const time = `${String(hour).padStart(2, '0')}:${dmyMatch[5] || '00'}:00`
     const attempt = new Date(`${dmyMatch[2]} ${dmyMatch[1]}, ${year} ${time}`)
     if (!isNaN(attempt.getTime())) return attempt
   }
