@@ -32,7 +32,7 @@ export const WORKLOAD_DEFAULTS = {
   afterCallMid: 7.5,             // midpoint
   afterCallHigh: 10,             // high estimate
   ticketLow: 15,                 // minutes actual work per qualifying ticket, low
-  ticketMid: 30,                 // midpoint
+  ticketMid: 20,                 // midpoint
   ticketHigh: 45,                // high estimate
   quickResolveThresholdMin: 20,  // tickets resolved within 20 min are treated as call-handled
 }
