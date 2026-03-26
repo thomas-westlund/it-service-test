@@ -103,6 +103,20 @@ export function calculateAgentWorkload(phoneAgent, jiraStats, settings = {}) {
   }
 }
 
+/**
+ * Normalise an agent name to a matching key using first + last word only.
+ * "Jarle Alexander Dominici Pedersen" → "jarle pedersen"
+ * "Jarle A Dominici Pedersen"         → "jarle pedersen"
+ * Lets phone and Jira records for the same person match even when middle
+ * names or initials differ between exports.
+ */
+export function nameMatchKey(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return ''
+  if (parts.length === 1) return parts[0].toLowerCase()
+  return `${parts[0]} ${parts[parts.length - 1]}`.toLowerCase()
+}
+
 /** Format minutes as Xh Ym */
 export function formatMinutes(min) {
   if (min == null || isNaN(min) || min < 0) return '—'

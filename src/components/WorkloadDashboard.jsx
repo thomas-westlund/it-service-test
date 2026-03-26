@@ -6,7 +6,7 @@ import {
 import StatCard from './StatCard'
 import {
   TEAM_CONFIG, WORKLOAD_DEFAULTS,
-  computeCapacity, calculateAgentWorkload, formatMinutes, formatMinutesLong
+  computeCapacity, calculateAgentWorkload, formatMinutes, formatMinutesLong, nameMatchKey
 } from '../utils/workloadCalc'
 import './WorkloadDashboard.css'
 
@@ -49,12 +49,12 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
 
   const agentRows = useMemo(() => {
     const phoneMap = {}
-    if (phoneData) phoneData.forEach(a => { phoneMap[a.agent.toLowerCase()] = a })
+    if (phoneData) phoneData.forEach(a => { phoneMap[nameMatchKey(a.agent)] = a })
 
     const jiraMap = {}
     if (jiraData?.byAssignee) {
       Object.entries(jiraData.byAssignee).forEach(([name, stats]) => {
-        jiraMap[name.toLowerCase()] = { name, stats }
+        jiraMap[nameMatchKey(name)] = { name, stats }
       })
     }
 
@@ -237,7 +237,7 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
       {/* Per-Agent Table */}
       <div className="dashboard-section">
         <div className="section-header">📋 Agent Workload Breakdown</div>
-        <div className="data-table-wrapper">
+        <div className="data-table-wrapper" style={{ overflowX: 'auto' }}>
           <table className="data-table workload-table">
             <thead>
               <tr>

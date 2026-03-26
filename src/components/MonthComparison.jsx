@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
-import { calculateAgentWorkload, computeCapacity, TEAM_CONFIG, WORKLOAD_DEFAULTS, formatMinutes } from '../utils/workloadCalc'
+import { calculateAgentWorkload, computeCapacity, TEAM_CONFIG, WORKLOAD_DEFAULTS, formatMinutes, nameMatchKey } from '../utils/workloadCalc'
 import { formatPeriodLabel } from '../utils/historyStorage'
 import './MonthComparison.css'
 
@@ -25,12 +25,12 @@ function DeltaBadge({ value, unit = '', invert = false }) {
 
 function buildAgentWorkloads(phoneData, jiraData) {
   const phoneMap = {}
-  if (phoneData) phoneData.forEach(a => { phoneMap[a.agent.toLowerCase()] = a })
+  if (phoneData) phoneData.forEach(a => { phoneMap[nameMatchKey(a.agent)] = a })
 
   const jiraMap = {}
   if (jiraData?.byAssignee) {
     Object.entries(jiraData.byAssignee).forEach(([name, stats]) => {
-      jiraMap[name.toLowerCase()] = { name, stats }
+      jiraMap[nameMatchKey(name)] = { name, stats }
     })
   }
 
@@ -41,7 +41,7 @@ function buildAgentWorkloads(phoneData, jiraData) {
     const jiraEntry = jiraMap[key] || null
     const displayName = phone?.agent || jiraEntry?.name || key
     const wl = calculateAgentWorkload(phone, jiraEntry?.stats, WORKLOAD_DEFAULTS)
-    result[displayName.toLowerCase()] = { displayName, phone, jiraStats: jiraEntry?.stats || null, wl }
+    result[nameMatchKey(displayName)] = { displayName, phone, jiraStats: jiraEntry?.stats || null, wl }
   })
   return result
 }
