@@ -16,8 +16,9 @@ const STORY_POINTS_COLUMNS = [
 const SUMMARY_COLUMNS = ['summary', 'title', 'subject', 'issue summary', 'name']
 const KEY_COLUMNS = ['issue key', 'key', 'id', 'issue id', 'ticket id', 'ticket']
 
-const OPEN_STATUSES = ['open', 'to do', 'todo', 'new', 'in progress', 'in review', 'reopened', 'pending', 'waiting']
-const RESOLVED_STATUSES = ['done', 'closed', 'resolved', 'completed', 'fixed', 'won\'t fix', 'wont fix', 'duplicate', 'invalid', 'cancelled']
+const RESOLVED_STATUSES = ['done', 'closed', 'resolved', 'completed', 'fixed', "won't fix", 'wont fix', 'duplicate', 'invalid', 'cancelled']
+
+const QUICK_RESOLVE_THRESHOLD_MS = 20 * 60 * 1000  // 20 minutes in ms
 
 function findColumn(headers, candidates) {
   for (const candidate of candidates) {
@@ -37,14 +38,13 @@ function findColumn(headers, candidates) {
 function parseTimeSpent(value) {
   if (!value || String(value).trim() === '') return 0
   const str = String(value).trim()
-
   if (/^\d+$/.test(str)) return parseInt(str)
 
   let seconds = 0
   const weekMatch = str.match(/(\d+)\s*w/i)
   const dayMatch = str.match(/(\d+)\s*d/i)
   const hourMatch = str.match(/(\d+)\s*h/i)
-  const minMatch = str.match(/(\d+)\s*m/i)
+  const minMatch = str.match(/(\d+)\s*m(?!s)/i)
   const secMatch = str.match(/(\d+)\s*s/i)
 
   if (weekMatch) seconds += parseInt(weekMatch[1]) * 5 * 8 * 3600
@@ -52,35 +52,50 @@ function parseTimeSpent(value) {
   if (hourMatch) seconds += parseInt(hourMatch[1]) * 3600
   if (minMatch) seconds += parseInt(minMatch[1]) * 60
   if (secMatch) seconds += parseInt(secMatch[1])
-
   return seconds
 }
 
-function isResolved(status) {
+/**
+ * Robustly parse a date/datetime string to a Date object
+ * Handles: ISO 8601, "DD/Mon/YY", "YYYY-MM-DD HH:mm", "YYYY-MM-DD"
+ */
+function parseDate(value) {
+  if (!value || String(value).trim() === '') return null
+  const str = String(value).trim()
+
+  // Try native Date parse first (handles ISO 8601 and many common formats)
+  const d = new Date(str)
+  if (!isNaN(d.getTime())) return d
+
+  // Jira legacy: "15/Mar/26 09:30" or "15/Mar/2026"
+  const dmyMatch = str.match(/^(\d{1,2})\/(\w{3})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2}))?/)
+  if (dmyMatch) {
+    const year = dmyMatch[3].length === 2 ? `20${dmyMatch[3]}` : dmyMatch[3]
+    const time = dmyMatch[4] ? `${dmyMatch[4]}:${dmyMatch[5]}:00` : '00:00:00'
+    const attempt = new Date(`${dmyMatch[2]} ${dmyMatch[1]}, ${year} ${time}`)
+    if (!isNaN(attempt.getTime())) return attempt
+  }
+
+  return null
+}
+
+export function isResolved(status) {
   if (!status) return false
   const lower = status.toLowerCase().trim()
   return RESOLVED_STATUSES.some(s => lower === s || lower.includes(s))
 }
 
-function isOpen(status) {
-  return !isResolved(status)
-}
-
 /**
- * Parse Jira export CSV
- * @param {Array<Object>} rows
- * @returns {{ normalizedRows, byAssignee, statusCounts, priorityCounts }}
+ * Normalize raw CSV rows to standard shape (with quickResolved flag)
+ * @param {Array<Object>} rows - raw PapaParse rows
+ * @returns {Array<Object>} normalized issue objects
  */
-export function parseJiraCSV(rows) {
-  if (!rows || rows.length === 0) {
-    return { normalizedRows: [], byAssignee: {}, statusCounts: {}, priorityCounts: {} }
-  }
+export function normalizeJiraRows(rows) {
+  if (!rows || rows.length === 0) return []
 
   const originalKeys = Object.keys(rows[0])
   const lowerKeyMap = {}
-  originalKeys.forEach(k => {
-    lowerKeyMap[k.toLowerCase().trim()] = k
-  })
+  originalKeys.forEach(k => { lowerKeyMap[k.toLowerCase().trim()] = k })
   const lowerHeaders = Object.keys(lowerKeyMap)
 
   const assigneeCol = findColumn(lowerHeaders, ASSIGNEE_COLUMNS)
@@ -96,25 +111,59 @@ export function parseJiraCSV(rows) {
 
   const get = (row, col) => col ? row[lowerKeyMap[col]] : null
 
-  const normalizedRows = rows
+  return rows
     .filter(row => {
       const assignee = get(row, assigneeCol)
       return assignee && String(assignee).trim() !== '' && String(assignee).trim().toLowerCase() !== 'unassigned'
     })
-    .map(row => ({
-      key: String(get(row, keyCol) || '').trim(),
-      summary: String(get(row, summaryCol) || '').trim(),
-      assignee: String(get(row, assigneeCol) || '').trim(),
-      status: String(get(row, statusCol) || 'Unknown').trim(),
-      type: String(get(row, typeCol) || 'Unknown').trim(),
-      priority: String(get(row, priorityCol) || 'Unknown').trim(),
-      created: String(get(row, createdCol) || '').trim(),
-      resolved: String(get(row, resolvedCol) || '').trim(),
-      timeSpentSeconds: parseTimeSpent(get(row, timeCol)),
-      storyPoints: parseFloat(get(row, pointsCol)) || 0,
-    }))
+    .map(row => {
+      const createdDate = parseDate(get(row, createdCol))
+      const resolvedDate = parseDate(get(row, resolvedCol))
 
-  // Aggregate by assignee
+      let quickResolved = false
+      let resolveTimeMinutes = null
+      if (createdDate && resolvedDate && resolvedDate > createdDate) {
+        resolveTimeMinutes = (resolvedDate.getTime() - createdDate.getTime()) / 60000
+        quickResolved = resolveTimeMinutes < 20
+      }
+
+      return {
+        key: String(get(row, keyCol) || '').trim(),
+        summary: String(get(row, summaryCol) || '').trim(),
+        assignee: String(get(row, assigneeCol) || '').trim(),
+        status: String(get(row, statusCol) || 'Unknown').trim(),
+        type: String(get(row, typeCol) || 'Unknown').trim(),
+        priority: String(get(row, priorityCol) || 'Unknown').trim(),
+        created: String(get(row, createdCol) || '').trim(),
+        resolved: String(get(row, resolvedCol) || '').trim(),
+        createdTs: createdDate ? createdDate.getTime() : null,
+        resolvedTs: resolvedDate ? resolvedDate.getTime() : null,
+        resolveTimeMinutes,
+        quickResolved,
+        timeSpentSeconds: parseTimeSpent(get(row, timeCol)),
+        storyPoints: parseFloat(get(row, pointsCol)) || 0,
+      }
+    })
+}
+
+/**
+ * Filter normalized rows to only those created within a given month
+ * If a row has no createdTs, it is included (no date to filter on)
+ */
+export function filterJiraByMonth(rows, year, month) {
+  if (!rows) return []
+  const start = new Date(year, month - 1, 1).getTime()
+  const end = new Date(year, month, 1).getTime()  // exclusive
+  return rows.filter(row => {
+    if (row.createdTs === null || row.createdTs === undefined) return true
+    return row.createdTs >= start && row.createdTs < end
+  })
+}
+
+/**
+ * Aggregate normalized rows into byAssignee map + global counts
+ */
+export function aggregateJiraRows(normalizedRows) {
   const byAssignee = {}
   const statusCounts = {}
   const priorityCounts = {}
@@ -124,6 +173,8 @@ export function parseJiraCSV(rows) {
     if (!byAssignee[name]) {
       byAssignee[name] = {
         totalTickets: 0,
+        qualifyingTickets: 0,      // excludes quick-resolved
+        quickResolvedCount: 0,
         openTickets: 0,
         resolvedTickets: 0,
         ticketsByStatus: {},
@@ -131,13 +182,24 @@ export function parseJiraCSV(rows) {
         ticketsByType: {},
         totalTimeSpentSeconds: 0,
         totalStoryPoints: 0,
+        _resolveTimes: [],          // temp, removed before return
       }
     }
 
     const a = byAssignee[name]
     a.totalTickets++
+
+    if (issue.quickResolved) {
+      a.quickResolvedCount++
+    } else {
+      a.qualifyingTickets++
+    }
+
     if (isResolved(issue.status)) {
       a.resolvedTickets++
+      if (!issue.quickResolved && issue.resolveTimeMinutes != null) {
+        a._resolveTimes.push(issue.resolveTimeMinutes)
+      }
     } else {
       a.openTickets++
     }
@@ -148,18 +210,44 @@ export function parseJiraCSV(rows) {
     a.totalTimeSpentSeconds += issue.timeSpentSeconds
     a.totalStoryPoints += issue.storyPoints
 
-    // Global counts
     statusCounts[issue.status] = (statusCounts[issue.status] || 0) + 1
     priorityCounts[issue.priority] = (priorityCounts[issue.priority] || 0) + 1
   }
 
-  return { normalizedRows, byAssignee, statusCounts, priorityCounts }
+  // Compute per-agent avg resolve time and clean up temp field
+  for (const a of Object.values(byAssignee)) {
+    if (a._resolveTimes.length > 0) {
+      a.avgResolveTimeMinutes = a._resolveTimes.reduce((s, v) => s + v, 0) / a._resolveTimes.length
+    } else {
+      a.avgResolveTimeMinutes = null
+    }
+    delete a._resolveTimes
+  }
+
+  // Global avg resolve time (non-quick, resolved tickets only)
+  const allResolveTimes = normalizedRows
+    .filter(r => !r.quickResolved && isResolved(r.status) && r.resolveTimeMinutes != null)
+    .map(r => r.resolveTimeMinutes)
+  const avgResolveTimeMinutes = allResolveTimes.length > 0
+    ? allResolveTimes.reduce((s, v) => s + v, 0) / allResolveTimes.length
+    : null
+
+  const totalQuickResolved = normalizedRows.filter(r => r.quickResolved).length
+
+  return { normalizedRows, byAssignee, statusCounts, priorityCounts, avgResolveTimeMinutes, totalQuickResolved }
+}
+
+/**
+ * Full parse: normalize + aggregate (no month filter)
+ * Kept for compatibility; use normalizeJiraRows + filterJiraByMonth + aggregateJiraRows for month-aware flow
+ */
+export function parseJiraCSV(rows) {
+  const normalized = normalizeJiraRows(rows)
+  return aggregateJiraRows(normalized)
 }
 
 /**
  * Detect if CSV headers look like a Jira export
- * @param {string[]} headers
- * @returns {boolean}
  */
 export function detectJiraCSV(headers) {
   const lower = headers.map(h => h.toLowerCase().trim())
@@ -168,7 +256,6 @@ export function detectJiraCSV(headers) {
   const hasType = findColumn(lower, TYPE_COLUMNS) !== null
   const hasKey = findColumn(lower, KEY_COLUMNS) !== null
   const hasPriority = findColumn(lower, PRIORITY_COLUMNS) !== null
-
   const score = [hasAssignee, hasStatus, hasType, hasKey, hasPriority].filter(Boolean).length
   return score >= 2
 }

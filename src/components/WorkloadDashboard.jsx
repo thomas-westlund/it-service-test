@@ -1,292 +1,288 @@
-import React, { useMemo } from 'react'
+import React, { useState, useMemo } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  Legend, ResponsiveContainer, Cell
+  ResponsiveContainer
 } from 'recharts'
 import StatCard from './StatCard'
-import './PhoneDashboard.css'
+import {
+  TEAM_CONFIG, WORKLOAD_DEFAULTS,
+  computeCapacity, calculateAgentWorkload, formatMinutes, formatMinutesLong
+} from '../utils/workloadCalc'
 import './WorkloadDashboard.css'
-
-// Fuzzy name match: normalize and check if names are close enough
-function normalizeName(name) {
-  return name.toLowerCase().replace(/[^a-z]/g, '')
-}
-
-function namesMatch(a, b) {
-  const na = normalizeName(a)
-  const nb = normalizeName(b)
-  if (na === nb) return true
-  // Check if one contains the other (handles initials or shortened names)
-  if (na.includes(nb) || nb.includes(na)) return true
-  // Check first+last name parts overlap
-  const partsA = a.toLowerCase().split(/\s+/)
-  const partsB = b.toLowerCase().split(/\s+/)
-  const sharedParts = partsA.filter(p => partsB.some(q => q === p || q.startsWith(p) || p.startsWith(q)))
-  return sharedParts.length >= 2
-}
-
-function getWorkloadColor(score) {
-  if (score >= 80) return '#e02424'
-  if (score >= 60) return '#c27803'
-  if (score >= 40) return '#1a56db'
-  return '#057a55'
-}
 
 function shortenName(name) {
   const parts = name.split(' ')
-  if (parts.length >= 2) return `${parts[0]} ${parts[1][0]}.`
-  return name
+  return parts.length >= 2 ? `${parts[0]} ${parts[1][0]}.` : name
 }
 
-function formatDuration(seconds) {
-  if (!seconds) return '0:00'
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `${m}:${String(Math.floor(s)).padStart(2, '0')}`
+function scoreColor(pct) {
+  if (pct >= 90) return 'var(--danger)'
+  if (pct >= 70) return 'var(--warning)'
+  if (pct >= 40) return 'var(--success)'
+  return 'var(--primary)'
+}
+
+const WorkloadTooltip = ({ active, payload }) => {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  return (
+    <div style={{ background: 'white', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px', boxShadow: 'var(--shadow-md)', fontSize: 12 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{d.fullName}</div>
+      <div style={{ color: '#6366f1' }}>Phone time: <strong>{formatMinutes(d.phoneMid)}</strong> <span style={{ color: 'var(--text-muted)' }}>({formatMinutes(d.phoneLow)}–{formatMinutes(d.phoneHigh)})</span></div>
+      <div style={{ color: '#0891b2' }}>Ticket time: <strong>{formatMinutes(d.ticketMid)}</strong> <span style={{ color: 'var(--text-muted)' }}>({formatMinutes(d.ticketLow)}–{formatMinutes(d.ticketHigh)})</span></div>
+      <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6, fontWeight: 600 }}>
+        Total: {formatMinutes(d.totalMid)} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>({formatMinutes(d.totalLow)}–{formatMinutes(d.totalHigh)})</span>
+      </div>
+      {d.avgResolve != null && (
+        <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>Avg resolve: {formatMinutes(d.avgResolve)}</div>
+      )}
+    </div>
+  )
 }
 
 export default function WorkloadDashboard({ phoneData, jiraData }) {
-  const { byAssignee } = jiraData || {}
+  const [afterCallMid, setAfterCallMid] = useState(WORKLOAD_DEFAULTS.afterCallMid)
+  const [ticketMid, setTicketMid] = useState(WORKLOAD_DEFAULTS.ticketMid)
 
-  const agents = useMemo(() => {
-    const phoneAgents = phoneData || []
-    const jiraAgentNames = Object.keys(byAssignee || {})
+  const capacity = useMemo(() => computeCapacity(TEAM_CONFIG), [])
 
-    // Max values for normalization
-    const maxCalls = Math.max(...phoneAgents.map(a => a.totalCalls), 1)
-    const maxDuration = Math.max(...phoneAgents.map(a => a.totalDurationSeconds), 1)
-    const maxTickets = Math.max(...jiraAgentNames.map(n => byAssignee[n].totalTickets), 1)
+  const agentRows = useMemo(() => {
+    const phoneMap = {}
+    if (phoneData) phoneData.forEach(a => { phoneMap[a.agent.toLowerCase()] = a })
 
-    // Build combined agent list
-    const allNames = new Set()
-    phoneAgents.forEach(a => allNames.add(a.agent))
-    jiraAgentNames.forEach(n => allNames.add(n))
-
-    const result = []
-    const usedJiraNames = new Set()
-
-    for (const name of allNames) {
-      // Find phone record
-      const phone = phoneAgents.find(a => namesMatch(a.agent, name))
-      // Find jira record
-      let jiraName = null
-      for (const jn of jiraAgentNames) {
-        if (!usedJiraNames.has(jn) && namesMatch(jn, name)) {
-          jiraName = jn
-          break
-        }
-      }
-
-      // Skip if this agent is already represented through a jira match
-      if (!phone && jiraName && usedJiraNames.has(jiraName)) continue
-
-      if (jiraName) usedJiraNames.add(jiraName)
-
-      const jira = jiraName ? byAssignee[jiraName] : null
-
-      // Workload score (0-100)
-      // Weights: calls 35%, duration 25%, tickets 40%
-      const callScore = phone ? (phone.totalCalls / maxCalls) * 35 : 0
-      const durationScore = phone ? (phone.totalDurationSeconds / maxDuration) * 25 : 0
-      const ticketScore = jira ? (jira.totalTickets / maxTickets) * 40 : 0
-      const workloadScore = Math.round(callScore + durationScore + ticketScore)
-
-      const canonicalName = phone ? phone.agent : (jiraName || name)
-
-      // Avoid duplicates
-      if (result.find(r => normalizeName(r.agent) === normalizeName(canonicalName))) continue
-
-      result.push({
-        agent: canonicalName,
-        // Phone
-        totalCalls: phone?.totalCalls || 0,
-        answeredCalls: phone?.answeredCalls || 0,
-        missedCalls: phone?.missedCalls || 0,
-        avgDurationSeconds: phone?.avgDurationSeconds || 0,
-        totalDurationSeconds: phone?.totalDurationSeconds || 0,
-        hasPhone: !!phone,
-        // Jira
-        totalTickets: jira?.totalTickets || 0,
-        openTickets: jira?.openTickets || 0,
-        resolvedTickets: jira?.resolvedTickets || 0,
-        totalStoryPoints: jira?.totalStoryPoints || 0,
-        hasJira: !!jira,
-        // Score
-        workloadScore,
-        callScore: Math.round(callScore),
-        durationScore: Math.round(durationScore),
-        ticketScore: Math.round(ticketScore),
+    const jiraMap = {}
+    if (jiraData?.byAssignee) {
+      Object.entries(jiraData.byAssignee).forEach(([name, stats]) => {
+        jiraMap[name.toLowerCase()] = { name, stats }
       })
     }
 
-    return result.sort((a, b) => b.workloadScore - a.workloadScore)
-  }, [phoneData, jiraData, byAssignee])
+    const allNames = new Set([...Object.keys(phoneMap), ...Object.keys(jiraMap)])
+    const settings = { afterCallMid, ticketMid }
 
-  const chartData = agents.map(a => ({
-    name: shortenName(a.agent),
-    fullName: a.agent,
-    'Phone Calls': a.callScore,
-    'Call Duration': a.durationScore,
-    'Jira Tickets': a.ticketScore,
-    total: a.workloadScore,
+    return Array.from(allNames).map(key => {
+      const phone = phoneMap[key] || null
+      const jiraEntry = jiraMap[key] || null
+      const displayName = phone?.agent || jiraEntry?.name || key
+      const wl = calculateAgentWorkload(phone, jiraEntry?.stats, settings)
+      return { displayName, phone, jiraStats: jiraEntry?.stats || null, wl, hasPhone: !!phone, hasJira: !!jiraEntry }
+    }).sort((a, b) => b.wl.totalMid - a.wl.totalMid)
+  }, [phoneData, jiraData, afterCallMid, ticketMid])
+
+  const totalQuickResolved = jiraData?.totalQuickResolved ?? 0
+  const avgResolveTime = jiraData?.avgResolveTimeMinutes ?? null
+
+  const chartData = agentRows.map(r => ({
+    name: shortenName(r.displayName),
+    fullName: r.displayName,
+    phoneMid: Math.round(r.wl.phoneTotalMid),
+    phoneLow: Math.round(r.wl.phoneTotalLow),
+    phoneHigh: Math.round(r.wl.phoneTotalHigh),
+    ticketMid: Math.round(r.wl.ticketTotalMid),
+    ticketLow: Math.round(r.wl.ticketTotalLow),
+    ticketHigh: Math.round(r.wl.ticketTotalHigh),
+    totalMid: Math.round(r.wl.totalMid),
+    totalLow: Math.round(r.wl.totalLow),
+    totalHigh: Math.round(r.wl.totalHigh),
+    avgResolve: r.wl.avgResolveTimeMinutes != null ? Math.round(r.wl.avgResolveTimeMinutes) : null,
   }))
 
-  const bothCount = agents.filter(a => a.hasPhone && a.hasJira).length
-  const phoneOnlyCount = agents.filter(a => a.hasPhone && !a.hasJira).length
-  const jiraOnlyCount = agents.filter(a => !a.hasPhone && a.hasJira).length
-  const avgScore = agents.length > 0 ? Math.round(agents.reduce((s, a) => s + a.workloadScore, 0) / agents.length) : 0
-  const topAgent = agents[0]
-
-  const WorkloadTooltip = ({ active, payload, label }) => {
-    if (!active || !payload?.length) return null
-    const item = chartData.find(d => d.name === label) || {}
-    return (
-      <div style={{
-        background: 'white', border: '1px solid var(--border)', borderRadius: 6,
-        padding: '10px 14px', boxShadow: 'var(--shadow-md)', fontSize: 12
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>{item.fullName || label}</div>
-        {payload.map(p => (
-          <div key={p.name} style={{ color: p.fill, display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-            <span>{p.name}:</span><span style={{ fontWeight: 600 }}>{p.value}</span>
-          </div>
-        ))}
-        <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6, fontWeight: 700 }}>
-          Total Score: {item.total}/100
-        </div>
-      </div>
-    )
-  }
+  const teamTotalMid = agentRows.reduce((s, r) => s + r.wl.totalMid, 0)
+  const teamTotalLow = agentRows.reduce((s, r) => s + r.wl.totalLow, 0)
+  const teamTotalHigh = agentRows.reduce((s, r) => s + r.wl.totalHigh, 0)
+  const agentCount = agentRows.length || 1
+  const avgWorkloadMid = teamTotalMid / agentCount
+  const monthlyNetMinutes = capacity.netMinutesPerDay * 21
 
   return (
     <div className="workload-dashboard">
-      {/* Summary */}
+
+      {/* Assumptions */}
       <div className="dashboard-section" style={{ marginTop: 16 }}>
-        <div className="section-header">⚖️ Combined Workload Summary</div>
+        <div className="section-header">⚙️ Workload Assumptions</div>
+        <div className="assumptions-grid">
+
+          <div className="assumption-group">
+            <div className="assumption-title">After-call work per answered call</div>
+            <div className="slider-row">
+              <span className="slider-label">{WORKLOAD_DEFAULTS.afterCallLow}m</span>
+              <input type="range"
+                min={WORKLOAD_DEFAULTS.afterCallLow} max={WORKLOAD_DEFAULTS.afterCallHigh}
+                step={0.5} value={afterCallMid}
+                onChange={e => setAfterCallMid(parseFloat(e.target.value))}
+                className="range-slider"
+              />
+              <span className="slider-label">{WORKLOAD_DEFAULTS.afterCallHigh}m</span>
+              <span className="slider-value">{afterCallMid}m</span>
+            </div>
+            <div className="assumption-note">Tickets created &amp; resolved within 20 min are excluded (handled during the call)</div>
+          </div>
+
+          <div className="assumption-group">
+            <div className="assumption-title">Actual work per qualifying ticket</div>
+            <div className="slider-row">
+              <span className="slider-label">{WORKLOAD_DEFAULTS.ticketLow}m</span>
+              <input type="range"
+                min={WORKLOAD_DEFAULTS.ticketLow} max={WORKLOAD_DEFAULTS.ticketHigh}
+                step={1} value={ticketMid}
+                onChange={e => setTicketMid(parseInt(e.target.value))}
+                className="range-slider"
+              />
+              <span className="slider-label">{WORKLOAD_DEFAULTS.ticketHigh}m</span>
+              <span className="slider-value">{ticketMid}m</span>
+            </div>
+            <div className="assumption-note">Rest of ticket lifetime is estimated wait / queue time</div>
+          </div>
+
+          <div className="assumption-group">
+            <div className="assumption-title">Daily capacity (per person)</div>
+            <div className="capacity-breakdown">
+              <span>{TEAM_CONFIG.workDayMinutes / 60}h day</span>
+              <span className="cap-sep">−</span>
+              <span>{TEAM_CONFIG.lunchBreakMinutes}m lunch</span>
+              <span className="cap-sep">−</span>
+              <span>{capacity.breaksPerDay}m breaks ({TEAM_CONFIG.breakMinutesPerHour}m/h)</span>
+              <span className="cap-sep">=</span>
+              <strong>{capacity.netMinutesPerDay}m net/day</strong>
+            </div>
+            <div className="assumption-note">
+              {capacity.annualWorkingDays} working days/yr · {TEAM_CONFIG.vacationWeeks} wks vacation ·
+              on-call ~{capacity.onCallTimesPerYear}×/yr (leave {TEAM_CONFIG.onCallLeaveHour}:00, −{formatMinutes(capacity.onCallMinutesLostPerOccurrence)}/occurrence)
+            </div>
+          </div>
+
+          <div className="assumption-group">
+            <div className="assumption-title">Team structure</div>
+            <div className="team-structure-badges">
+              <span className="team-badge total">{TEAM_CONFIG.teamSize} members</span>
+              <span className="team-badge phones">{TEAM_CONFIG.phonesAlwaysStaffed} always on phones</span>
+              <span className="team-badge tickets">{TEAM_CONFIG.teamSize - TEAM_CONFIG.phonesAlwaysStaffed} on tickets</span>
+            </div>
+            <div className="assumption-note">On-call rotation every {TEAM_CONFIG.onCallIntervalWeeks} weeks per person</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Summary Stats */}
+      <div className="dashboard-section">
+        <div className="section-header">📊 Workload Summary</div>
         <div className="stats-grid">
-          <StatCard title="Total Agents" value={agents.length} subtitle="Across both datasets" color="var(--primary)" />
-          <StatCard title="In Both Datasets" value={bothCount} subtitle="Phone + Jira matched" color="var(--success)" />
-          <StatCard title="Avg Workload Score" value={`${avgScore}/100`} subtitle="Normalized 0–100" color="var(--warning)" />
-          {topAgent && (
-            <StatCard
-              title="Highest Workload"
-              value={topAgent.agent.split(' ')[0]}
-              subtitle={`Score: ${topAgent.workloadScore}/100`}
-              color="var(--danger)"
-            />
-          )}
+          <StatCard
+            title="Team Total Workload"
+            value={formatMinutes(teamTotalMid)}
+            subtitle={`Range: ${formatMinutes(teamTotalLow)} – ${formatMinutes(teamTotalHigh)}`}
+            color="var(--primary)"
+          />
+          <StatCard
+            title="Avg Workload / Agent"
+            value={formatMinutes(avgWorkloadMid)}
+            subtitle={`vs ${formatMinutes(monthlyNetMinutes)} net capacity (~21 work days)`}
+            color={scoreColor((avgWorkloadMid / monthlyNetMinutes) * 100)}
+          />
+          <StatCard
+            title="Quick-Resolved Tickets"
+            value={totalQuickResolved}
+            subtitle="Excluded — created & resolved <20 min (handled during call)"
+            color="var(--text-muted)"
+          />
+          <StatCard
+            title="Avg Ticket Resolve Time"
+            value={avgResolveTime != null ? formatMinutes(avgResolveTime) : '—'}
+            subtitle={avgResolveTime != null ? 'Non-quick tickets with resolution timestamp' : 'Needs resolved timestamps in Jira data'}
+            color="#7c3aed"
+          />
+          <StatCard
+            title="Net Capacity / Day"
+            value={`${capacity.netMinutesPerDay}m`}
+            subtitle={`${capacity.annualWorkingDays} working days/yr after ${TEAM_CONFIG.vacationWeeks} wks vacation`}
+            color="var(--success)"
+          />
+          <StatCard
+            title="On-Call Impact / Person"
+            value={formatMinutesLong(capacity.onCallMinutesLostAnnual)}
+            subtitle={`~${capacity.onCallTimesPerYear}×/yr × ${formatMinutes(capacity.onCallMinutesLostPerOccurrence)} each`}
+            color="var(--warning)"
+          />
         </div>
       </div>
 
-      {/* Scoring legend */}
+      {/* Chart */}
       <div className="dashboard-section">
+        <div className="section-header">📈 Estimated Workload Per Agent</div>
         <div className="workload-legend">
-          <strong style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Score Weights:</strong>
           <div className="workload-legend-item">
-            <div className="workload-legend-dot" style={{ background: '#1a56db' }} />
-            Phone Calls — 35%
+            <div className="workload-legend-dot" style={{ background: '#6366f1' }} />
+            Phone time (call duration + {afterCallMid}m after-call work per answered call)
           </div>
           <div className="workload-legend-item">
-            <div className="workload-legend-dot" style={{ background: '#7c3aed' }} />
-            Call Duration — 25%
-          </div>
-          <div className="workload-legend-item">
-            <div className="workload-legend-dot" style={{ background: '#c27803' }} />
-            Jira Tickets — 40%
+            <div className="workload-legend-dot" style={{ background: '#0891b2' }} />
+            Ticket time (qualifying tickets × {ticketMid}m)
           </div>
         </div>
-      </div>
-
-      {/* Workload Bar Chart */}
-      <div className="dashboard-section">
-        <div className="section-header">📊 Workload Score by Agent</div>
         <div className="chart-card">
-          <div className="chart-title">Stacked Workload Contribution (0–100 scale)</div>
-          <ResponsiveContainer width="100%" height={320}>
+          <ResponsiveContainer width="100%" height={300}>
             <BarChart data={chartData} margin={{ top: 4, right: 8, left: -10, bottom: 40 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis
-                dataKey="name"
-                tick={{ fontSize: 11 }}
-                angle={-30}
-                textAnchor="end"
-                interval={0}
-              />
-              <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} />
+              <XAxis dataKey="name" tick={{ fontSize: 11 }} angle={-30} textAnchor="end" interval={0} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={v => `${v}m`} />
               <Tooltip content={<WorkloadTooltip />} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="Phone Calls" stackId="a" fill="#1a56db" />
-              <Bar dataKey="Call Duration" stackId="a" fill="#7c3aed" />
-              <Bar dataKey="Jira Tickets" stackId="a" fill="#c27803" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="phoneMid" stackId="a" fill="#6366f1" name="Phone" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="ticketMid" stackId="a" fill="#0891b2" name="Tickets" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
 
-      {/* Combined Table */}
+      {/* Per-Agent Table */}
       <div className="dashboard-section">
-        <div className="section-header">📋 Agent Workload Details</div>
+        <div className="section-header">📋 Agent Workload Breakdown</div>
         <div className="data-table-wrapper">
-          <table className="data-table">
+          <table className="data-table workload-table">
             <thead>
               <tr>
                 <th>Agent</th>
-                <th>Data Source</th>
-                <th className="number">Calls</th>
-                <th className="number">Answer Rate</th>
-                <th className="number">Avg Duration</th>
+                <th>Data</th>
+                <th className="number">Answered calls</th>
+                <th className="number">Phone time</th>
                 <th className="number">Tickets</th>
-                <th className="number">Open</th>
-                <th className="number">Story Pts</th>
-                <th className="number">Workload Score</th>
+                <th className="number">Quick excl.</th>
+                <th className="number">Ticket time</th>
+                <th className="number">Avg resolve</th>
+                <th className="number">Low</th>
+                <th className="number">Mid</th>
+                <th className="number">High</th>
+                <th style={{ minWidth: 130 }}>vs capacity</th>
               </tr>
             </thead>
             <tbody>
-              {agents.map((agent) => {
-                const answerRate = agent.totalCalls > 0
-                  ? Math.round((agent.answeredCalls / agent.totalCalls) * 100)
-                  : null
-                const scoreColor = getWorkloadColor(agent.workloadScore)
+              {agentRows.map(({ displayName, phone, jiraStats, wl, hasPhone, hasJira }) => {
+                const pct = monthlyNetMinutes > 0 ? (wl.totalMid / monthlyNetMinutes) * 100 : 0
+                const color = scoreColor(pct)
                 return (
-                  <tr key={agent.agent}>
-                    <td className="agent-name">{agent.agent}</td>
+                  <tr key={displayName}>
+                    <td className="agent-name">{displayName}</td>
                     <td>
-                      {agent.hasPhone && agent.hasJira ? (
-                        <span className="match-badge both">📞🎫 Both</span>
-                      ) : agent.hasPhone ? (
-                        <span className="match-badge phone-only">📞 Phone</span>
-                      ) : (
-                        <span className="match-badge jira-only">🎫 Jira</span>
-                      )}
+                      <div style={{ display: 'flex', gap: 3 }}>
+                        {hasPhone && <span className="match-badge phone-only">📞</span>}
+                        {hasJira && <span className="match-badge jira-only">🎫</span>}
+                      </div>
                     </td>
-                    <td className="number">{agent.hasPhone ? agent.totalCalls.toLocaleString() : '—'}</td>
-                    <td className="number">
-                      {answerRate !== null ? (
-                        <span style={{
-                          color: answerRate >= 90 ? 'var(--success)' : answerRate >= 75 ? 'var(--warning)' : 'var(--danger)',
-                          fontWeight: 600
-                        }}>
-                          {answerRate}%
-                        </span>
-                      ) : '—'}
-                    </td>
-                    <td className="number">{agent.hasPhone ? formatDuration(agent.avgDurationSeconds) : '—'}</td>
-                    <td className="number">{agent.hasJira ? agent.totalTickets : '—'}</td>
-                    <td className="number" style={{ color: agent.openTickets > 0 ? 'var(--warning)' : 'inherit' }}>
-                      {agent.hasJira ? agent.openTickets : '—'}
-                    </td>
-                    <td className="number">{agent.hasJira ? (agent.totalStoryPoints || 0) : '—'}</td>
-                    <td className="number">
+                    <td className="number">{phone ? phone.answeredCalls : '—'}</td>
+                    <td className="number">{formatMinutes(wl.phoneTotalMid)}</td>
+                    <td className="number">{jiraStats ? jiraStats.qualifyingTickets : '—'}</td>
+                    <td className="number" style={{ color: 'var(--text-muted)' }}>{jiraStats ? wl.quickCount : '—'}</td>
+                    <td className="number">{formatMinutes(wl.ticketTotalMid)}</td>
+                    <td className="number">{wl.avgResolveTimeMinutes != null ? formatMinutes(wl.avgResolveTimeMinutes) : '—'}</td>
+                    <td className="number" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{formatMinutes(wl.totalLow)}</td>
+                    <td className="number" style={{ fontWeight: 600 }}>{formatMinutes(wl.totalMid)}</td>
+                    <td className="number" style={{ color: 'var(--text-muted)', fontSize: 12 }}>{formatMinutes(wl.totalHigh)}</td>
+                    <td>
                       <div className="workload-score-bar">
                         <div className="workload-score-track">
-                          <div
-                            className="workload-score-fill"
-                            style={{ width: `${agent.workloadScore}%`, background: scoreColor }}
-                          />
+                          <div className="workload-score-fill" style={{ width: `${Math.min(pct, 100)}%`, background: color }} />
                         </div>
-                        <span className="workload-score-value" style={{ color: scoreColor }}>
-                          {agent.workloadScore}
-                        </span>
+                        <span className="workload-score-value" style={{ color }}>{Math.round(pct)}%</span>
                       </div>
                     </td>
                   </tr>
@@ -294,6 +290,9 @@ export default function WorkloadDashboard({ phoneData, jiraData }) {
               })}
             </tbody>
           </table>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, paddingLeft: 4 }}>
+          % = mid estimate vs ~{formatMinutes(monthlyNetMinutes)} net monthly capacity (21 working days × {capacity.netMinutesPerDay}m/day)
         </div>
       </div>
     </div>
